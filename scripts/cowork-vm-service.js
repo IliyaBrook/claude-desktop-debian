@@ -1263,15 +1263,25 @@ class KvmBackend extends BackendBase {
             this._guestBuffer = parsed.remaining;
             const msg = parsed.message;
 
+            // Log all guest messages as decoded JSON for debugging
+            log('KvmBackend: guest message:', JSON.stringify(msg).substring(0, 500));
+
             if (FORWARDED_EVENTS.has(msg.type)) {
                 this.emitEvent(msg);
-            } else if (msg.success !== undefined) {
+            } else if (msg.type === 'event' && FORWARDED_EVENTS.has(msg.event)) {
+                // Guest sends {type:"event", event:"networkStatus", params:{...}}
+                this.emitEvent({ type: msg.event, ...msg.params });
+            } else if (msg.type === 'response' || msg.success !== undefined) {
                 // Response to a request we sent — route to pending callback
+                // Guest sends {type:"response", id:"1", result:{success:true}}
+                if (msg.error) {
+                    log('KvmBackend: guest response ERROR for id=' + msg.id + ':', JSON.stringify(msg.error));
+                }
                 if (this._pendingCallbacks && msg.id !== undefined) {
                     const cb = this._pendingCallbacks.get(String(msg.id));
                     if (cb) {
                         this._pendingCallbacks.delete(String(msg.id));
-                        cb(msg);
+                        cb(msg.result || msg);
                     }
                 }
             } else {
@@ -1371,7 +1381,10 @@ class KvmBackend extends BackendBase {
             });
 
             try {
-                writeMessage(this._guestConn, request);
+                // Guest expects {type:"request", method:..., params:..., id:...}
+                const wireMsg = { type: 'request', ...request };
+                log('KvmBackend: forwarding to guest:', JSON.stringify(wireMsg).substring(0, 200));
+                writeMessage(this._guestConn, wireMsg);
             } catch (err) {
                 clearTimeout(timer);
                 this._pendingCallbacks.delete(request.id);
