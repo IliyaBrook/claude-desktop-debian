@@ -172,7 +172,7 @@ Special thanks to:
 - **[Voork1144](https://github.com/Voork1144)** for detailed analysis of the tray icon minifier bug, root-cause analysis of the Chromium layout cache bug, and the direct child `setBounds()` fix approach
 - **[sabiut](https://github.com/sabiut)** for the `--doctor` diagnostic command
 - **[milog1994](https://github.com/milog1994)** for Linux UX improvements including popup detection, functional stubs, and Wayland compositor support
-- **[jarrodcolburn](https://github.com/jarrodcolburn)** for passwordless sudo support in container/CI environments
+- **[jarrodcolburn](https://github.com/jarrodcolburn)** for passwordless sudo support in container/CI environments and identifying the gh-pages 4GB bloat fix
 - **[chukfinley](https://github.com/chukfinley)** for experimental Cowork mode support on Linux
 - **[IliyaBrook](https://github.com/IliyaBrook)** for fixing the platform patch for Claude Desktop >= 1.1.3541 arm64 refactor
 - **[MichaelMKenny](https://github.com/MichaelMKenny)** for diagnosing the `$`-prefixed electron variable bug with root cause analysis and workaround
