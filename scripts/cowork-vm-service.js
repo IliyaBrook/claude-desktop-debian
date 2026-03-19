@@ -875,7 +875,8 @@ const QMP_CAPABILITIES = JSON.stringify({ execute: 'qmp_capabilities' });
 
 /** Event types forwarded from the guest sdk-daemon to subscribers. */
 const FORWARDED_EVENTS = new Set([
-    'stdout', 'stderr', 'exit', 'networkStatus', 'apiReachability', 'ready',
+    'stdout', 'stderr', 'exit', 'networkStatus', 'apiReachability',
+    'ready', 'startupStep',
 ]);
 
 class KvmBackend extends BackendBase {
@@ -953,6 +954,11 @@ class KvmBackend extends BackendBase {
         const memoryGB = params.memoryGB ||
             Math.ceil(this.config.memoryMB / 1024);
         const cpuCount = this.config.cpuCount;
+
+        this.emitEvent({
+            type: 'startupStep',
+            step: 'prepare_session', status: 'running',
+        });
 
         // Create session directory
         const sessionId = crypto.randomUUID();
@@ -1095,6 +1101,10 @@ class KvmBackend extends BackendBase {
         }
 
         // Start QEMU
+        this.emitEvent({
+            type: 'startupStep',
+            step: 'start_vm', status: 'running',
+        });
         log(`KvmBackend: starting QEMU with CID ${this.guestCid}`);
         this.qemuProcess = spawnProcess('qemu-system-x86_64', qemuArgs, {
             stdio: ['pipe', 'pipe', 'pipe'],
@@ -1125,7 +1135,17 @@ class KvmBackend extends BackendBase {
 
         // Wait for guest sdk-daemon to connect via vsock bridge
         // (_waitForGuest starts both the bridge server and socat listener)
+        this.emitEvent({
+            type: 'startupStep',
+            step: 'wait_for_guest', status: 'running',
+        });
         await this._waitForGuest();
+
+        this.emitEvent({
+            type: 'startupStep',
+            step: 'wait_for_guest',
+            status: this.guestConnected ? 'completed' : 'failed',
+        });
 
         return {};
     }
@@ -1360,10 +1380,11 @@ class KvmBackend extends BackendBase {
             await this._forwardToGuest({
                 method: 'installSdk', params: this._pendingSdkInstall
             });
-            this._pendingSdkInstall = null;
         } catch (e) {
             log(`KvmBackend: installSdk forward failed: ${e.message}`);
         }
+        // Clear regardless of success/failure to avoid infinite retries
+        this._pendingSdkInstall = null;
     }
 
     _forwardToGuest(request) {
@@ -1605,8 +1626,15 @@ class KvmBackend extends BackendBase {
             // Compute the guest-side path via virtiofs mount
             const homeDir = os.homedir();
             const relPath = path.relative(homeDir, resolved);
-            this.guestSdkPath = path.join(VIRTIOFS_GUEST_MOUNT, relPath);
-            log(`KvmBackend: guest SDK path: ${this.guestSdkPath}`);
+            if (relPath.startsWith('..')) {
+                log(`KvmBackend: SDK path ${resolved} is outside ` +
+                    'home dir, cannot map to guest');
+            } else {
+                this.guestSdkPath =
+                    path.join(VIRTIOFS_GUEST_MOUNT, relPath);
+                log(`KvmBackend: guest SDK path: ` +
+                    this.guestSdkPath);
+            }
         }
         // Forward to guest so it can prepare the SDK (or defer until spawn)
         this._pendingSdkInstall = params;
@@ -1771,6 +1799,14 @@ class VMManager {
         return this.backend.addApprovedOauthToken(params);
     }
 
+    // --- Debug Logging ---
+
+    setDebugLogging(params) {
+        const { enabled } = params;
+        log(`setDebugLogging: ${enabled}`);
+        return {};
+    }
+
     // --- Events (managed by VMManager, not backend) ---
 
     subscribeEvents(socket) {
@@ -1814,6 +1850,7 @@ const METHODS = {
     readFile: (params) => vm.readFile(params),
     installSdk: (params) => vm.installSdk(params),
     addApprovedOauthToken: (params) => vm.addApprovedOauthToken(params),
+    setDebugLogging: (params) => vm.setDebugLogging(params),
     subscribeEvents: (params, socket) => vm.subscribeEvents(socket),
 };
 
