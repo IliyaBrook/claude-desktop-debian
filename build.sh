@@ -73,8 +73,8 @@ verify_sha256() {
 	fi
 
 	echo "Verifying SHA-256 checksum for ${label}..."
-	local actual_hash
-	actual_hash=$(sha256sum "$file_path" | awk '{print $1}')
+	local actual_hash _
+	read -r actual_hash _ < <(sha256sum "$file_path")
 
 	if [[ $actual_hash != "$expected_hash" ]]; then
 		echo "SHA-256 mismatch for ${label}!" >&2
@@ -453,13 +453,12 @@ setup_nodejs() {
 	shasums_url="https://nodejs.org/dist/v${node_version_to_install}/SHASUMS256.txt"
 	node_expected_sha256=$(
 		wget -qO- "$shasums_url" \
-			| grep "$node_tarball" \
+			| grep -F "$node_tarball" \
 			| awk '{print $1}'
 	) || true
 
 	if ! verify_sha256 "$work_dir/$node_tarball" \
 		"$node_expected_sha256" 'Node.js tarball'; then
-		echo 'Node.js integrity check failed!' >&2
 		cd "$project_root" || exit 1
 		exit 1
 	fi
@@ -575,7 +574,6 @@ download_claude_installer() {
 
 		if ! verify_sha256 "$claude_exe_path" \
 			"$claude_exe_sha256" 'Claude Desktop installer'; then
-			echo 'Download integrity check failed!' >&2
 			exit 1
 		fi
 	fi
