@@ -147,8 +147,21 @@ cleanup_stale_cowork_socket() {
 }
 
 # Set common environment variables
+# Arguments: $1 = package type ("deb", "appimage", "rpm", or "nix")
 setup_electron_env() {
-	export ELECTRON_FORCE_IS_PACKAGED=true
+	local package_type="${1:-deb}"
+
+	# ELECTRON_FORCE_IS_PACKAGED makes app.isPackaged return true, which
+	# causes the Claude app to resolve resources via process.resourcesPath.
+	# On NixOS, Electron is a separate store path so resourcesPath points
+	# to Electron's resources dir, not the app's.  The frame-fix-wrapper
+	# corrects this at JS load time, but some app code may run before the
+	# fix or cache the original value.  Skipping this env var for Nix
+	# keeps isPackaged=false, using development-style fallback paths that
+	# work correctly with NixOS's split-package layout.
+	if [[ $package_type != 'nix' ]]; then
+		export ELECTRON_FORCE_IS_PACKAGED=true
+	fi
 	export ELECTRON_USE_SYSTEM_TITLE_BAR=1
 }
 
