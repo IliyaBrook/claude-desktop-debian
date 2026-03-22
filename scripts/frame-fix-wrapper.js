@@ -186,6 +186,17 @@ Module.prototype.require = function(id) {
                 }
               });
 
+              // Tiling WMs (Hyprland, i3, sway) emit 'resize' on
+              // workspace switches. The upstream layout handler uses
+              // getContentBounds() which returns stale cached values,
+              // setting child views to wrong dimensions. Fix
+              // immediately so we race the upstream handler rather
+              // than arriving late. The fixChildBounds() guard
+              // (cur.width !== cw check) prevents unnecessary
+              // setBounds during drag resize where the cache stays
+              // in sync. Fixes: #323
+              this.on('resize', fixAfterStateChange);
+
               // ready-to-show fires once per window lifecycle
               this.once('ready-to-show', () => {
                 if (MENU_BAR_MODE !== 'visible') {
