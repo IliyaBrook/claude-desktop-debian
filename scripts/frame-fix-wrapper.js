@@ -186,6 +186,13 @@ Module.prototype.require = function(id) {
                 }
               });
 
+              // Tiling WMs (Hyprland, i3, sway) emit 'resize' on
+              // workspace switches with stale getContentBounds()
+              // cache. The size-change guard in fixChildBounds()
+              // prevents unnecessary work during drag resize.
+              // Fixes: #323
+              this.on('resize', fixAfterStateChange);
+
               // ready-to-show fires once per window lifecycle
               this.once('ready-to-show', () => {
                 if (MENU_BAR_MODE !== 'visible') {
