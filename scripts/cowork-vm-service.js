@@ -385,6 +385,135 @@ function resolveCommand(command, sdkBinaryPath) {
 }
 
 // ============================================================
+// Bwrap Mount Configuration
+// ============================================================
+
+const FORBIDDEN_MOUNT_PATHS = new Set(['/', '/proc', '/dev', '/sys']);
+
+function validateMountPath(mountPath, opts) {
+    opts = opts || {};
+    if (!mountPath || !path.isAbsolute(mountPath)) {
+        return { valid: false, reason: 'Path must be absolute' };
+    }
+
+    const normalized = path.resolve(mountPath);
+
+    if (FORBIDDEN_MOUNT_PATHS.has(normalized)) {
+        return { valid: false, reason: `Path is forbidden: ${normalized}` };
+    }
+
+    for (const forbidden of FORBIDDEN_MOUNT_PATHS) {
+        if (forbidden !== '/' && normalized.startsWith(forbidden + '/')) {
+            return { valid: false, reason: `Path is under forbidden path: ${forbidden}` };
+        }
+    }
+
+    if (opts.readWrite) {
+        const home = os.homedir();
+        if (normalized !== home && !normalized.startsWith(home + '/')) {
+            return { valid: false, reason: 'Read-write mounts must be under $HOME' };
+        }
+    }
+
+    return { valid: true };
+}
+
+function loadBwrapMountsConfig(configPath, logFn) {
+    const warn = logFn || log;
+    const empty = {
+        additionalROBinds: [],
+        additionalBinds: [],
+        disabledDefaultBinds: [],
+    };
+
+    if (!configPath) {
+        configPath = path.join(
+            process.env.HOME || os.homedir(),
+            '.config', 'Claude', 'claude_desktop_linux_config.json'
+        );
+    }
+
+    let raw;
+    try {
+        raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    } catch (_) {
+        return empty;
+    }
+
+    const mounts = raw && raw.preferences && raw.preferences.coworkBwrapMounts;
+    if (!mounts || typeof mounts !== 'object') {
+        return empty;
+    }
+
+    function filterPaths(arr, readWrite) {
+        if (!Array.isArray(arr)) return [];
+        return arr.filter(p => {
+            if (typeof p !== 'string') return false;
+            const result = validateMountPath(p, { readWrite });
+            if (!result.valid) {
+                warn(`BwrapConfig: rejected path "${p}": ${result.reason}`);
+            }
+            return result.valid;
+        });
+    }
+
+    return {
+        additionalROBinds: filterPaths(mounts.additionalROBinds, false),
+        additionalBinds: filterPaths(mounts.additionalBinds, true),
+        disabledDefaultBinds: Array.isArray(mounts.disabledDefaultBinds)
+            ? mounts.disabledDefaultBinds.filter(p => typeof p === 'string')
+            : [],
+    };
+}
+
+const CRITICAL_MOUNTS = new Set(['/', '/dev', '/proc']);
+
+function mergeBwrapArgs(defaultArgs, config) {
+    const result = [];
+    const disabled = new Set(
+        config.disabledDefaultBinds.filter(p => !CRITICAL_MOUNTS.has(p))
+    );
+
+    const TWO_ARG_FLAGS = new Set(['--tmpfs', '--dev', '--proc', '--dir']);
+    const THREE_ARG_FLAGS = new Set(['--ro-bind', '--bind', '--symlink']);
+
+    let i = 0;
+    while (i < defaultArgs.length) {
+        const flag = defaultArgs[i];
+
+        if (THREE_ARG_FLAGS.has(flag) && i + 2 < defaultArgs.length) {
+            const dest = defaultArgs[i + 2];
+            if (disabled.has(dest)) {
+                i += 3;
+                continue;
+            }
+            result.push(defaultArgs[i], defaultArgs[i + 1], defaultArgs[i + 2]);
+            i += 3;
+        } else if (TWO_ARG_FLAGS.has(flag) && i + 1 < defaultArgs.length) {
+            const dest = defaultArgs[i + 1];
+            if (disabled.has(dest)) {
+                i += 2;
+                continue;
+            }
+            result.push(defaultArgs[i], defaultArgs[i + 1]);
+            i += 2;
+        } else {
+            result.push(defaultArgs[i]);
+            i++;
+        }
+    }
+
+    for (const p of config.additionalROBinds) {
+        result.push('--ro-bind', p, p);
+    }
+    for (const p of config.additionalBinds) {
+        result.push('--bind', p, p);
+    }
+
+    return result;
+}
+
+// ============================================================
 // Backend Base Class
 // ============================================================
 
@@ -744,6 +873,7 @@ class BwrapBackend extends LocalBackend {
     constructor(emitEvent) {
         super(emitEvent, 'BwrapBackend');
         this.mountBinds = new Map(); // mountName -> hostPath
+        this.bwrapMountsConfig = loadBwrapMountsConfig();
     }
 
     async startVM(params) {
@@ -792,7 +922,7 @@ class BwrapBackend extends LocalBackend {
         // necessary system paths bound in read-only. This avoids
         // exposing the real home directory and allows creating the
         // /sessions/ guest path structure that claude-code-vm expects.
-        const bwrapArgs = [
+        const defaultBwrapArgs = [
             '--tmpfs', '/',
             '--ro-bind', '/usr', '/usr',
             '--ro-bind', '/etc', '/etc',
@@ -808,10 +938,10 @@ class BwrapBackend extends LocalBackend {
         for (const dir of ['/bin', '/lib', '/lib64', '/sbin']) {
             try {
                 const target = fs.readlinkSync(dir);
-                bwrapArgs.push('--symlink', target, dir);
+                defaultBwrapArgs.push('--symlink', target, dir);
             } catch (_) {
                 if (fs.existsSync(dir)) {
-                    bwrapArgs.push('--ro-bind', dir, dir);
+                    defaultBwrapArgs.push('--ro-bind', dir, dir);
                 }
             }
         }
@@ -823,11 +953,14 @@ class BwrapBackend extends LocalBackend {
             const resolvedConf = fs.realpathSync('/etc/resolv.conf');
             if (resolvedConf.startsWith('/run/')) {
                 const resolvedDir = path.dirname(resolvedConf);
-                bwrapArgs.push('--ro-bind', resolvedDir, resolvedDir);
+                defaultBwrapArgs.push('--ro-bind', resolvedDir, resolvedDir);
             }
         } catch (e) {
             log('BwrapBackend: could not resolve /etc/resolv.conf:', e.message);
         }
+
+        // Merge user-configured mounts (disable overrides + additional mounts)
+        const bwrapArgs = mergeBwrapArgs(defaultBwrapArgs, this.bwrapMountsConfig);
 
         // Bind the SDK binary read-only
         const sdkDir = path.dirname(actualCommand);
