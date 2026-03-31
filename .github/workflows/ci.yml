@@ -210,22 +210,24 @@ jobs:
             echo "::warning::No previous release found"
           fi
 
-      - name: Run compare-releases (upstream change)
-        if: steps.prev.outcome == 'success' && steps.prev.outputs.type == 'upstream'
-        timeout-minutes: 5
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          appimage=$(find artifacts/ -name '*amd64*.AppImage' ! -name '*.zsync' | head -1)
-          python versions/scripts/compare-releases.py \
-            --old "${{ steps.prev.outputs.tag }}" \
-            --new "${GITHUB_REF_NAME}" \
-            --new-appimage "$appimage" \
-            --model sonnet \
-            --voice-profile-url "https://raw.githubusercontent.com/aaddrick/written-voice-replication/master/.claude/agents/aaddrick-voice.md" \
-            --workdir compare-work
+      # compare-releases disabled: script kills the runner (~86s OOM/SIGTERM),
+      # blocking releases. See #361. Re-enable once debugged in claude-desktop-versions.
+      # - name: Run compare-releases (upstream change)
+      #   if: steps.prev.outcome == 'success' && steps.prev.outputs.type == 'upstream'
+      #   timeout-minutes: 5
+      #   continue-on-error: true
+      #   env:
+      #     GH_TOKEN: ${{ github.token }}
+      #     ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      #   run: |
+      #     appimage=$(find artifacts/ -name '*amd64*.AppImage' ! -name '*.zsync' | head -1)
+      #     python versions/scripts/compare-releases.py \
+      #       --old "${{ steps.prev.outputs.tag }}" \
+      #       --new "${GITHUB_REF_NAME}" \
+      #       --new-appimage "$appimage" \
+      #       --model sonnet \
+      #       --voice-profile-url "https://raw.githubusercontent.com/aaddrick/written-voice-replication/master/.claude/agents/aaddrick-voice.md" \
+      #       --workdir compare-work
 
       - name: Append wrapper commits to upstream notes
         if: steps.prev.outcome == 'success' && steps.prev.outputs.type == 'upstream'
