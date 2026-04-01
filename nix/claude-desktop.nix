@@ -42,6 +42,11 @@ let
       && !(lib.hasPrefix "result" rel);
   };
 
+  # The unwrapped electron derivation — contains the real ELF binary
+  # and Chromium resources (.pak files, locales/, etc.).
+  electronUnwrapped = electron.passthru.unwrapped or electron;
+  electronDir = "${electronUnwrapped}/libexec/electron";
+
   desktopItem = makeDesktopItem {
     name = "claude-desktop";
     exec = "claude-desktop %u";
@@ -96,10 +101,95 @@ stdenvNoCC.mkDerivation {
   installPhase = ''
     runHook preInstall
 
-    # Install app.asar and unpacked resources
-    mkdir -p $out/lib/claude-desktop/resources
-    cp build/electron-app/app.asar $out/lib/claude-desktop/resources/
-    cp -r build/electron-app/app.asar.unpacked $out/lib/claude-desktop/resources/
+    #==========================================================================
+    # Create a custom Electron tree with app resources co-located.
+    #
+    # On NixOS, the stock electron-unwrapped lives in a read-only store
+    # path.  Chromium computes process.resourcesPath from /proc/self/exe,
+    # so it always points to electron-unwrapped's resources/ dir — which
+    # doesn't contain the app's locale JSONs, tray icons, etc.  When
+    # ELECTRON_FORCE_IS_PACKAGED=true, the app reads en-US.json from
+    # resourcesPath at module load time (before frame-fix-wrapper.js can
+    # correct the path), causing an ENOENT crash.
+    #
+    # Solution: copy the Electron ELF binary into our own tree so that
+    # /proc/self/exe resolves here, then merge both Electron's and the
+    # app's resources into resources/.  Everything else (shared libs,
+    # .pak files, locales/) is symlinked to avoid duplication.
+    #==========================================================================
+    electron_tree=$out/lib/claude-desktop/electron
+
+    mkdir -p $electron_tree/resources
+
+    # Copy the ELF binary — MUST be a real copy (not symlink) so that
+    # /proc/self/exe resolves to our tree
+    cp ${electronDir}/electron $electron_tree/electron
+
+    # Symlink everything else from electron-unwrapped
+    for item in ${electronDir}/*; do
+      name=$(basename "$item")
+      [ "$name" = "electron" ] && continue
+      [ "$name" = "resources" ] && continue
+      ln -s "$item" "$electron_tree/$name"
+    done
+
+    # Populate resources/ — start with Electron's own (default_app.asar)
+    for item in ${electronDir}/resources/*; do
+      ln -s "$item" "$electron_tree/resources/$(basename "$item")"
+    done
+
+    # Install app.asar and unpacked resources into the merged tree
+    cp build/electron-app/app.asar $electron_tree/resources/
+    cp -r build/electron-app/app.asar.unpacked $electron_tree/resources/
+
+    # Install tray icons into resources
+    for tray_icon in build/electron-app/nix-resources/Tray*; do
+      if [ -f "$tray_icon" ]; then
+        cp "$tray_icon" $electron_tree/resources/
+      fi
+    done
+
+    # Install SSH helpers into resources
+    if [ -d build/electron-app/nix-resources/claude-ssh ]; then
+      cp -r build/electron-app/nix-resources/claude-ssh $electron_tree/resources/
+    fi
+
+    # Install cowork resources (smol-bin, plugin shim)
+    for cowork_res in build/electron-app/nix-resources/smol-bin.*.vhdx \
+                      build/electron-app/nix-resources/cowork-plugin-shim.sh; do
+      if [ -f "$cowork_res" ]; then
+        cp "$cowork_res" $electron_tree/resources/
+        echo "Installed cowork resource: $(basename "$cowork_res")"
+      fi
+    done
+
+    # Install locale JSON files into resources
+    for locale_json in build/claude-extract/lib/net45/resources/*-*.json; do
+      if [ -f "$locale_json" ]; then
+        cp "$locale_json" $electron_tree/resources/
+      fi
+    done
+
+    # Create the electron wrapper — replicates the env setup from the
+    # stock electron wrapper (GIO, GTK, GDK_PIXBUF, XDG_DATA_DIRS) but
+    # execs our custom binary.  We extract everything except the final
+    # exec line from the stock wrapper, then append our own exec.
+    head -n -1 ${electron}/bin/electron > $electron_tree/electron-wrapper
+    echo "exec \"$electron_tree/electron\"  \"\$@\"" >> $electron_tree/electron-wrapper
+    chmod +x $electron_tree/electron-wrapper
+
+    # Update CHROME_DEVEL_SANDBOX to point to our tree's chrome-sandbox
+    substituteInPlace $electron_tree/electron-wrapper \
+      --replace-quiet "${electron}/libexec/electron/chrome-sandbox" \
+        "$electron_tree/chrome-sandbox"
+
+    #==========================================================================
+    # Standard install (icons, desktop file, launcher)
+    #==========================================================================
+
+    # Convenience symlink for resources dir (used by launcher, FHS, etc.)
+    mkdir -p $out/lib/claude-desktop
+    ln -s $electron_tree/resources $out/lib/claude-desktop/resources
 
     # Install icons
     for size in 16 24 32 48 64 256; do
@@ -111,35 +201,6 @@ stdenvNoCC.mkDerivation {
       fi
     done
 
-    # Install tray icons into resources
-    for tray_icon in build/electron-app/nix-resources/Tray*; do
-      if [ -f "$tray_icon" ]; then
-        cp "$tray_icon" $out/lib/claude-desktop/resources/
-      fi
-    done
-
-    # Install SSH helpers into resources
-    if [ -d build/electron-app/nix-resources/claude-ssh ]; then
-      cp -r build/electron-app/nix-resources/claude-ssh $out/lib/claude-desktop/resources/
-    fi
-
-    # Install cowork resources (smol-bin, plugin shim)
-    for cowork_res in build/electron-app/nix-resources/smol-bin.*.vhdx \
-                      build/electron-app/nix-resources/cowork-plugin-shim.sh; do
-      if [ -f "$cowork_res" ]; then
-        cp "$cowork_res" $out/lib/claude-desktop/resources/
-        echo "Installed cowork resource: $(basename "$cowork_res")"
-      fi
-    done
-
-    # Install locale JSON files into resources (belt-and-suspenders;
-    # they're also packed inside app.asar at resources/i18n/)
-    for locale_json in build/claude-extract/lib/net45/resources/*-*.json; do
-      if [ -f "$locale_json" ]; then
-        cp "$locale_json" $out/lib/claude-desktop/resources/
-      fi
-    done
-
     # Install shared launcher library
     install -Dm755 ${sourceRoot}/scripts/launcher-common.sh \
       $out/lib/claude-desktop/launcher-common.sh
@@ -148,9 +209,7 @@ stdenvNoCC.mkDerivation {
     mkdir -p $out/share/applications
     install -Dm644 ${desktopItem}/share/applications/* $out/share/applications/
 
-    # Create launcher script (sources launcher-common.sh for --doctor,
-    # CLAUDE_USE_WAYLAND, display detection, and other shared features
-    # — matching the deb/RPM/AppImage launchers)
+    # Create launcher script
     mkdir -p $out/bin
     cat > $out/bin/claude-desktop <<'LAUNCHER'
 #!/usr/bin/env bash
@@ -169,7 +228,7 @@ fi
 
 # Setup logging and environment
 setup_logging || exit 1
-setup_electron_env 'nix'
+setup_electron_env
 cleanup_orphaned_cowork_daemon
 cleanup_stale_lock
 cleanup_stale_cowork_socket
@@ -203,10 +262,11 @@ exit_code=$?
 log_message "Electron exited with code: $exit_code"
 exit $exit_code
 LAUNCHER
-    # Substitute placeholders with Nix store paths
+    # Substitute placeholders — electron_exec points to our custom
+    # wrapper (which sets GTK/GIO env then execs our merged binary)
     substituteInPlace $out/bin/claude-desktop \
-      --replace-fail "ELECTRON_PLACEHOLDER" "${electron}/bin/electron" \
-      --replace-fail "RESOURCES_PLACEHOLDER" "$out/lib/claude-desktop/resources" \
+      --replace-fail "ELECTRON_PLACEHOLDER" "$electron_tree/electron-wrapper" \
+      --replace-fail "RESOURCES_PLACEHOLDER" "$electron_tree/resources" \
       --replace-fail "LAUNCHER_LIB_PLACEHOLDER" "$out/lib/claude-desktop/launcher-common.sh"
     chmod +x $out/bin/claude-desktop
 
