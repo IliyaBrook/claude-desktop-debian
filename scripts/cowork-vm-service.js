@@ -731,7 +731,7 @@ class HostBackend extends LocalBackend {
     async mountPath(params) {
         const { subpath } = params;
         log(`HostBackend mountPath: ${subpath}`);
-        const guestPath = path.join(os.homedir(), subpath || '');
+        const guestPath = path.join('/', subpath || '');
         return { guestPath };
     }
 }
@@ -910,7 +910,7 @@ class BwrapBackend extends LocalBackend {
     async mountPath(params) {
         const { subpath, mountName } = params;
         log(`BwrapBackend mountPath: ${mountName} -> ${subpath}`);
-        const hostPath = path.join(os.homedir(), subpath || '');
+        const hostPath = path.join('/', subpath || '');
         // Store for --bind on next spawn
         this.mountBinds.set(mountName || subpath, hostPath);
         return { guestPath: hostPath };
@@ -1720,7 +1720,7 @@ class KvmBackend extends BackendBase {
         }
 
         // No home share — return host path with a warning
-        const hostPath = path.join(os.homedir(), subpath || '');
+        const hostPath = path.join('/', subpath || '');
         log('KvmBackend: no home share, returning host path');
         return { guestPath: hostPath };
     }
