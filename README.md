@@ -150,10 +150,16 @@ For additional troubleshooting, uninstallation instructions, and log locations, 
 This project was inspired by [k3d3's claude-desktop-linux-flake](https://github.com/k3d3/claude-desktop-linux-flake) and their [Reddit post](https://www.reddit.com/r/ClaudeAI/comments/1hgsmpq/i_successfully_ran_claude_desktop_natively_on/) about running Claude Desktop natively on Linux.
 
 Special thanks to:
-- **k3d3** for the original NixOS implementation and native bindings insights
-- **[emsi](https://github.com/emsi/claude-desktop)** for the title bar fix and alternative implementation approach
+- **k3d3**
+  - Original NixOS implementation
+  - Native bindings insights
+- **[emsi](https://github.com/emsi/claude-desktop)**
+  - Title bar fix
+  - Alternative implementation approach
 - **[leobuskin](https://github.com/leobuskin/unofficial-claude-desktop-linux)** for the Playwright-based URL resolution approach
-- **[yarikoptic](https://github.com/yarikoptic)** for codespell support and shellcheck compliance
+- **[yarikoptic](https://github.com/yarikoptic)**
+  - Codespell support
+  - Shellcheck compliance
 - **[IamGianluca](https://github.com/IamGianluca)** for build dependency check improvements
 - **[ing03201](https://github.com/ing03201)** for IBus/Fcitx5 input method support
 - **[ajescudero](https://github.com/ajescudero)** for pinning @electron/asar for Node compatibility
@@ -163,25 +169,54 @@ Special thanks to:
 - **[speleoalex](https://github.com/speleoalex)** for native window decorations support
 - **[imaginalnika](https://github.com/imaginalnika)** for moving logs to `~/.cache/`
 - **[richardspicer](https://github.com/richardspicer)** for the menu bar visibility fix on Linux
-- **[jacobfrantz1](https://github.com/jacobfrantz1)** for Claude Desktop code preview support and quick window submit fix
+- **[jacobfrantz1](https://github.com/jacobfrantz1)**
+  - Claude Desktop code preview support
+  - Quick window submit fix
 - **[janfrederik](https://github.com/janfrederik)** for the `--exe` flag to use a local installer
 - **[MrEdwards007](https://github.com/MrEdwards007)** for discovering the OAuth token cache fix
 - **[lizthegrey](https://github.com/lizthegrey)** for version update contributions
-- **[mathys-lopinto](https://github.com/mathys-lopinto)** for the AUR package and automated deployment
+- **[mathys-lopinto](https://github.com/mathys-lopinto)**
+  - AUR package
+  - Automated deployment
 - **[pkuijpers](https://github.com/pkuijpers)** for root cause analysis of the RPM repo GPG signing issue
 - **[dlepold](https://github.com/dlepold)** for identifying the tray icon variable name bug with a working fix
-- **[Voork1144](https://github.com/Voork1144)** for detailed analysis of the tray icon minifier bug, root-cause analysis of the Chromium layout cache bug, and the direct child `setBounds()` fix approach
-- **[sabiut](https://github.com/sabiut)** for the `--doctor` diagnostic command and SHA-256 checksum validation for downloads
-- **[milog1994](https://github.com/milog1994)** for Linux UX improvements including popup detection, functional stubs, and Wayland compositor support
-- **[jarrodcolburn](https://github.com/jarrodcolburn)** for passwordless sudo support in container/CI environments, identifying the gh-pages 4GB bloat fix, identifying the virtiofsd PATH detection issue on Debian, detailed analysis of the CI release pipeline failure caused by runner kills during compare-releases, and diagnosing the session-start hook sudo blocking issue with three solution approaches
+- **[Voork1144](https://github.com/Voork1144)**
+  - Detailed analysis of the tray icon minifier bug
+  - Root-cause analysis of the Chromium layout cache bug
+  - Direct child `setBounds()` fix approach
+- **[sabiut](https://github.com/sabiut)**
+  - `--doctor` diagnostic command
+  - SHA-256 checksum validation for downloads
+- **[milog1994](https://github.com/milog1994)**
+  - Popup detection
+  - Functional stubs
+  - Wayland compositor support
+- **[jarrodcolburn](https://github.com/jarrodcolburn)**
+  - Passwordless sudo support in container/CI environments
+  - Identifying the gh-pages 4GB bloat fix
+  - Identifying the virtiofsd PATH detection issue on Debian
+  - Detailed analysis of the CI release pipeline failure caused by runner kills during compare-releases
+  - Diagnosing the session-start hook sudo blocking issue with three solution approaches
 - **[chukfinley](https://github.com/chukfinley)** for experimental Cowork mode support on Linux
 - **[CyPack](https://github.com/CyPack)** for orphaned cowork daemon cleanup on startup
 - **[IliyaBrook](https://github.com/IliyaBrook)** for fixing the platform patch for Claude Desktop >= 1.1.3541 arm64 refactor
-- **[MichaelMKenny](https://github.com/MichaelMKenny)** for diagnosing the `$`-prefixed electron variable bug with root cause analysis and workaround
+- **[MichaelMKenny](https://github.com/MichaelMKenny)**
+  - Diagnosing the `$`-prefixed electron variable bug
+  - Root cause analysis and workaround
 - **[daa25209](https://github.com/daa25209)** for detailed root cause analysis of the cowork platform gate crash and patch script
-- **[noctuum](https://github.com/noctuum)** for the `CLAUDE_MENU_BAR` env var with configurable menu bar visibility and boolean alias support
-- **[typedrat](https://github.com/typedrat)** for the NixOS flake integration with build.sh, node-pty derivation, CI auto-update, and fixing the flake package scoping regression
-- **[cbonnissent](https://github.com/cbonnissent)** for reverse-engineering the Cowork VM guest RPC protocol, fixing the KVM startup blocker, and fixing RPC response id echoing for persistent connections
+- **[noctuum](https://github.com/noctuum)**
+  - `CLAUDE_MENU_BAR` env var with configurable menu bar visibility
+  - Boolean alias support
+- **[typedrat](https://github.com/typedrat)**
+  - NixOS flake integration with build.sh
+  - node-pty derivation
+  - CI auto-update
+  - Fixing the flake package scoping regression
+- **[cbonnissent](https://github.com/cbonnissent)**
+  - Reverse-engineering the Cowork VM guest RPC protocol
+  - Fixing the KVM startup blocker
+  - Fixing RPC response id echoing for persistent connections
+  - Configurable bwrap mount points via a dedicated Linux config file
 - **[joekale-pp](https://github.com/joekale-pp)** for adding `--doctor` support to the RPM launcher
 - **[ecrevisseMiroir](https://github.com/ecrevisseMiroir)** for the bwrap backend sandbox isolation with tmpfs-based minimal root
 - **[arauhala](https://github.com/arauhala)** for detailed root cause analysis of the NixOS `isPackaged` regression
@@ -189,7 +224,9 @@ Special thanks to:
 - **[aHk-coder](https://github.com/aHk-coder)** for diagnosing the hardcoded minified variable crash in the cowork smol-bin patch
 - **[RayCharlizard](https://github.com/RayCharlizard)** for detailed analysis of the self-referential `.mcpb-cache` symlink ELOOP bug
 - **[reinthal](https://github.com/reinthal)** for fixing the NixOS build breakage caused by the nixpkgs `nodePackages` removal
-- **[gianluca-peri](https://github.com/gianluca-peri)** for reporting the GNOME quit accessibility issue and confirming tray behavior with AppIndicator
+- **[gianluca-peri](https://github.com/gianluca-peri)**
+  - Reporting the GNOME quit accessibility issue
+  - Confirming tray behavior with AppIndicator
 
 ## Sponsorship
 
