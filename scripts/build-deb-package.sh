@@ -168,7 +168,11 @@ echo 'Launcher script created'
 echo 'Creating control file...'
 # Electron is bundled with its own Node.js runtime, so nodejs/npm are not
 # runtime dependencies. p7zip is only used at build time to extract the
-# installer. No external dependencies are required at runtime.
+# installer.
+#
+# Recommends: X11 input + screenshot tools used by Computer Use. Listed as
+# "Recommends" (not "Depends") so the package installs on headless systems,
+# and users running Wayland can substitute with ydotool/grim.
 
 cat > "$package_root/DEBIAN/control" << EOF
 Package: $package_name
@@ -177,9 +181,15 @@ Section: utils
 Priority: optional
 Architecture: $architecture
 Maintainer: $maintainer
+Recommends: xdotool, scrot, xclip, wmctrl, imagemagick
+Suggests: ydotool, grim, spectacle, gnome-screenshot
 Description: $description
  Claude is an AI assistant from Anthropic.
  This package provides the desktop interface for Claude.
+ .
+ Computer Use (remote desktop automation) on Linux requires xdotool and scrot
+ on X11, or ydotool and grim on Wayland. These are listed under Recommends
+ and Suggests so installation succeeds on headless systems.
  .
  Supported on Debian-based Linux distributions (Debian, Ubuntu, Linux Mint, MX Linux, etc.)
 EOF

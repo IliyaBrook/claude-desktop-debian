@@ -178,6 +178,16 @@ URL:            https://claude.ai
 # Disable automatic dependency scanning (we bundle everything)
 AutoReqProv:    no
 
+# Recommends: runtime tools used by Computer Use (X11 path).
+# On Wayland users should install ydotool/grim instead.
+Recommends:     xdotool
+Recommends:     scrot
+Recommends:     xclip
+Recommends:     wmctrl
+Recommends:     ImageMagick
+Suggests:       ydotool
+Suggests:       grim
+
 # Disable debug package generation
 %define debug_package %{nil}
 
@@ -190,6 +200,10 @@ AutoReqProv:    no
 %description
 Claude is an AI assistant from Anthropic.
 This package provides the desktop interface for Claude.
+
+Computer Use (remote desktop automation) on Linux requires xdotool and scrot
+on X11, or ydotool and grim on Wayland. These are listed under Recommends
+and Suggests so installation succeeds on headless systems.
 
 Supported on RPM-based Linux distributions (Fedora, RHEL, CentOS, etc.)
 

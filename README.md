@@ -21,6 +21,12 @@ This project provides build scripts to run Claude Desktop natively on Linux syst
   - Global hotkey support (Ctrl+Alt+Space) - works on X11 and Wayland (via XWayland)
   - System tray integration
   - Desktop environment integration
+- **Computer Use & Dispatch**: Remote desktop automation and mobile→desktop task
+  orchestration work on Linux. Install the runtime dependencies below to use
+  them:
+  - **X11**: `xdotool scrot xclip wmctrl imagemagick` (listed under `Recommends:`)
+  - **Wayland**: `ydotool` (+ running `ydotoold` daemon), `grim`, and
+    `spectacle` (KDE) or `gnome-screenshot` (GNOME)
 
 ### Screenshots
 

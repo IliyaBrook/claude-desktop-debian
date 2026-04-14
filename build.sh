@@ -253,7 +253,8 @@ parse_arguments() {
 check_dependencies() {
 	echo 'Checking dependencies...'
 	local deps_to_install=''
-	local common_deps='p7zip wget wrestool icotool convert'
+	# python3 is needed to apply Linux Computer Use + Dispatch patches
+	local common_deps='p7zip wget wrestool icotool convert python3'
 	local all_deps="$common_deps"
 
 	# Add format-specific dependencies
@@ -266,11 +267,13 @@ check_dependencies() {
 	declare -A debian_pkgs=(
 		[p7zip]='p7zip-full' [wget]='wget' [wrestool]='icoutils'
 		[icotool]='icoutils' [convert]='imagemagick'
+		[python3]='python3'
 		[dpkg-deb]='dpkg-dev' [rpmbuild]='rpm'
 	)
 	declare -A rpm_pkgs=(
 		[p7zip]='p7zip p7zip-plugins' [wget]='wget' [wrestool]='icoutils'
 		[icotool]='icoutils' [convert]='ImageMagick'
+		[python3]='python3'
 		[dpkg-deb]='dpkg' [rpmbuild]='rpm-build'
 	)
 
@@ -644,6 +647,9 @@ console.log('Updated package.json: main entry and node-pty dependency');
 	cp "$project_root/scripts/cowork-vm-service.js" \
 		app.asar.contents/cowork-vm-service.js || exit 1
 	echo 'Cowork VM service daemon installed'
+
+	# Apply Python patches for Computer Use + Dispatch on Linux
+	apply_cu_dispatch_patches
 }
 
 patch_titlebar_detection() {
@@ -1094,6 +1100,89 @@ COWORK_PATCH
 	fi
 
 	echo '##############################################################'
+}
+
+apply_cu_dispatch_patches() {
+	section_header 'Computer Use + Dispatch Patches'
+	echo 'Applying Python patches for Linux Computer Use and Dispatch...'
+
+	local patches_dir="$project_root/patches"
+	local index_js='app.asar.contents/.vite/build/index.js'
+
+	if [[ ! -d $patches_dir ]]; then
+		echo "  WARNING: patches directory not found at $patches_dir" >&2
+		echo '  Skipping Computer Use + Dispatch integration' >&2
+		section_footer 'Computer Use + Dispatch Patches'
+		return 0
+	fi
+
+	if ! command -v python3 &> /dev/null; then
+		echo '  WARNING: python3 not found - skipping CU/Dispatch patches' >&2
+		echo '  Install python3 to enable Computer Use and Dispatch on Linux' >&2
+		section_footer 'Computer Use + Dispatch Patches'
+		return 0
+	fi
+
+	if [[ ! -f $index_js ]]; then
+		echo "  ERROR: target file not found: $index_js" >&2
+		section_footer 'Computer Use + Dispatch Patches'
+		return 1
+	fi
+
+	# Apply patches in dependency order:
+	#   1. fix_computer_use_tcc       - stub TCC IPC handlers (prevents errors)
+	#   2. fix_computer_use_linux     - Linux executor + platform gate bypass
+	#   3. fix_dispatch_linux         - enable Dispatch feature flags
+	#   4. fix_dispatch_outputs_dir   - fix "Show folder" for dispatch children
+	local patch_scripts=(
+		'fix_computer_use_tcc.py'
+		'fix_computer_use_linux.py'
+		'fix_dispatch_linux.py'
+		'fix_dispatch_outputs_dir.py'
+	)
+
+	local cu_patches_applied=0
+	local cu_patches_failed=0
+	local script script_path
+
+	for script in "${patch_scripts[@]}"; do
+		script_path="$patches_dir/$script"
+		if [[ ! -f $script_path ]]; then
+			echo "  WARNING: patch script missing: $script" >&2
+			cu_patches_failed=$(( cu_patches_failed + 1 ))
+			continue
+		fi
+
+		echo ''
+		echo "  --- Running $script ---"
+		if python3 "$script_path" "$index_js"; then
+			cu_patches_applied=$(( cu_patches_applied + 1 ))
+		else
+			echo "  WARNING: $script reported failures (build continues)" >&2
+			cu_patches_failed=$(( cu_patches_failed + 1 ))
+		fi
+	done
+
+	echo ''
+	echo "  Patches applied: $cu_patches_applied/${#patch_scripts[@]}"
+	if (( cu_patches_failed > 0 )); then
+		echo "  $cu_patches_failed patch(es) reported failures."
+		echo '  Computer Use / Dispatch may be partially available.'
+		echo '  If the Claude Desktop version was recently bumped,'
+		echo '  some regex patterns may need updating in patches/*.py.'
+	fi
+
+	# Validate the patched JavaScript parses successfully
+	if command -v node &> /dev/null; then
+		if ! node --check "$index_js" 2>/dev/null; then
+			echo '  ERROR: patched index.js failed syntax validation!' >&2
+			echo '  The Computer Use / Dispatch patches may have corrupted the file.' >&2
+			return 1
+		fi
+		echo '  JavaScript syntax validation: OK'
+	fi
+
+	section_footer 'Computer Use + Dispatch Patches'
 }
 
 install_node_pty() {

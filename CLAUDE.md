@@ -137,6 +137,37 @@ The app uses a wrapper system to intercept and fix Electron behavior for Linux:
 
 These are injected by `build.sh` and referenced in `package.json`'s `main` field. The wrapper pattern allows fixing Electron behavior without modifying the minified app code directly.
 
+## Computer Use + Dispatch Patches
+
+The `patches/` directory contains Python scripts ported from
+[patrickjaja/claude-desktop-bin](https://github.com/patrickjaja/claude-desktop-bin)
+that enable **Computer Use** and **Dispatch** on Linux:
+
+- `fix_computer_use_linux.py` — Bypass platform gates, inject a Linux executor (xdotool/ydotool/scrot/grim)
+- `fix_computer_use_tcc.py` — Stub the macOS `ComputerUseTcc` IPC handlers
+- `fix_dispatch_linux.py` — Force-enable Dispatch feature flags
+- `fix_dispatch_outputs_dir.py` — Redirect "Show folder" to child outputs when the parent is empty
+
+They are orchestrated from `build.sh` by `apply_cu_dispatch_patches()`, which
+runs after the shell-based patches. Failures are logged as warnings so the
+build continues even if a pattern no longer matches after an upstream release.
+
+### Adding or Updating Patches
+
+1. Each patch declares `@patch-target:` and `@patch-type: python` in its header.
+2. Use `\w+` / `[\w$]+` wildcards for minified variable names — hardcoded names break every release.
+3. After editing, validate with `node --check app.asar.contents/.vite/build/index.js` to catch syntax errors.
+
+### Runtime Dependencies
+
+The .deb and .rpm packages declare these as `Recommends:` / `Suggests:` so
+installation succeeds on headless systems. Users must install them manually
+before using Computer Use:
+
+- **X11**: `xdotool`, `scrot`, `xclip`, `wmctrl`, `imagemagick`
+- **Wayland**: `ydotool` (+ `ydotoold` daemon), `grim`, `spectacle` (KDE),
+  `gnome-screenshot` / `gst-launch-1.0` (GNOME)
+
 ## Setting Up build-reference
 
 If `build-reference/` is missing or you need to inspect source for a new version, follow these steps to download, extract, and beautify the source code.
