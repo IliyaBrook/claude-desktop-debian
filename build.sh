@@ -1161,6 +1161,7 @@ apply_cu_dispatch_patches() {
 	#   7. fix_computer_use_linux   - Linux executor + platform gate bypass
 	#   8. fix_dispatch_linux       - enable Dispatch feature flags
 	#   9. fix_dispatch_outputs_dir - fix "Show folder" for dispatch children
+	#  10. fix_dispatch_grant_ttl   - make CU grants never expire (unattended use)
 	local patch_scripts=(
 		'fix_0_node_host.py'
 		'fix_locale_paths.py'
@@ -1171,6 +1172,7 @@ apply_cu_dispatch_patches() {
 		'fix_computer_use_linux.py'
 		'fix_dispatch_linux.py'
 		'fix_dispatch_outputs_dir.py'
+		'fix_dispatch_grant_ttl.py'
 	)
 
 	local cu_patches_applied=0

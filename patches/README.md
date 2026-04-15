@@ -24,6 +24,7 @@ Applied in this order (dependencies matter — see `build.sh`
 | 7     | `fix_computer_use_linux.py`   | Bypass macOS/Windows platform gates, inject Linux executor (xdotool/ydotool/scrot/grim).                      |
 | 8     | `fix_dispatch_linux.py`       | Force-enable the Dispatch feature flags, bypass remote-session-control check, auto-wake cold parents.        |
 | 9     | `fix_dispatch_outputs_dir.py` | Fall back to child session outputs directory when parent's is empty.                                          |
+| 10    | `fix_dispatch_grant_ttl.py`   | Force the `dispatchCuGrantTtlMs` accessor to return `MAX_SAFE_INTEGER` so CU grants never expire (makes unattended Dispatch usable). |
 
 **Why order matters:** `fix_0_node_host` must run before `fix_locale_paths`
 (the latter rewrites `process.resourcesPath` globally). `enable_local_agent_mode`
