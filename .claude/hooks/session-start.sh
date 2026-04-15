@@ -35,7 +35,7 @@ install_apt_package() {
 	fi
 
 	log "Installing $pkg via apt..."
-	if sudo apt-get install -y -qq "$pkg" >> "$log_file" 2>&1; then
+	if sudo -n apt-get install -y -qq "$pkg" >> "$log_file" 2>&1; then
 		installed+=("$cmd")
 		return 0
 	else
@@ -66,7 +66,7 @@ install_actionlint() {
 		return 1
 	fi
 
-	if curl -sL "$url" | sudo tar xz -C /usr/local/bin actionlint; then
+	if curl -sL "$url" | sudo -n tar xz -C /usr/local/bin actionlint; then
 		installed+=('actionlint')
 		return 0
 	else
@@ -88,13 +88,13 @@ install_gh() {
 	local keyring='/usr/share/keyrings/githubcli-archive-keyring.gpg'
 	if [[ ! -f "$keyring" ]]; then
 		curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-			| sudo tee "$keyring" > /dev/null
+			| sudo -n tee "$keyring" > /dev/null
 		printf 'deb [arch=%s signed-by=%s] %s stable main\n' \
 			"$(dpkg --print-architecture)" \
 			"$keyring" \
 			'https://cli.github.com/packages' \
-			| sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-		sudo apt-get update -qq >> "$log_file" 2>&1
+			| sudo -n tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+		sudo -n apt-get update -qq >> "$log_file" 2>&1
 	fi
 
 	if sudo apt-get install -y -qq gh >> "$log_file" 2>&1; then
@@ -108,9 +108,23 @@ install_gh() {
 }
 
 main() {
-	# Update apt cache once at the start
+	# Skip everything if all tools are already present
+	if command -v jq &>/dev/null && command -v shellcheck &>/dev/null \
+		&& command -v actionlint &>/dev/null && command -v gh &>/dev/null; then
+		log 'All tools present, skipping install'
+		printf 'Already present: jq shellcheck actionlint gh\n'
+		return 0
+	fi
+
+	# Update apt cache once before installing missing tools.
+	# Use sudo -n (non-interactive) to avoid blocking on password
+	# prompts in contexts where the user can't respond (hooks, etc).
 	log 'Updating apt cache...'
-	sudo apt-get update -qq >> "$log_file" 2>&1
+	if ! sudo -n apt-get update -qq >> "$log_file" 2>&1; then
+		log 'sudo not available without password, skipping installs'
+		printf 'Skipped tool installation (sudo requires password)\n'
+		return 0
+	fi
 
 	# Install critical tools
 	install_apt_package 'jq'

@@ -1,8 +1,42 @@
 // Inject frame fix before main app loads
 const Module = require('module');
+const path = require('path');
 const originalRequire = Module.prototype.require;
 
 console.log('[Frame Fix] Wrapper loaded');
+
+// Fix process.resourcesPath to match the actual location of app.asar.
+// In Nix builds, electron is a separate store path so process.resourcesPath
+// points to the Electron package's resources dir, not where our tray icons
+// and app.asar.unpacked live. Deriving from __dirname (the asar root) gives
+// the correct path; for deb/AppImage builds the values already match.
+const derivedResourcesPath = path.dirname(__dirname);
+if (derivedResourcesPath !== process.resourcesPath) {
+  console.log('[Frame Fix] Correcting process.resourcesPath');
+  console.log('[Frame Fix]   Was:', process.resourcesPath);
+  console.log('[Frame Fix]   Now:', derivedResourcesPath);
+  process.resourcesPath = derivedResourcesPath;
+}
+
+// Menu bar visibility mode, controlled by CLAUDE_MENU_BAR env var:
+//   'auto'    - hidden by default, Alt toggles visibility (current default)
+//   'visible' - always visible, Alt does not toggle (stable layout)
+//   'hidden'  - always hidden, Alt does not toggle
+// Also accepts boolean-style aliases: 1/true/yes/on -> visible, 0/false/no/off -> hidden
+const VALID_MENU_BAR_MODES = ['auto', 'visible', 'hidden'];
+const MENU_BAR_ALIASES = {
+  '1': 'visible', 'true': 'visible', 'yes': 'visible', 'on': 'visible',
+  '0': 'hidden', 'false': 'hidden', 'no': 'hidden', 'off': 'hidden',
+};
+const rawMenuBarMode = (process.env.CLAUDE_MENU_BAR || 'auto').toLowerCase();
+const resolvedMode = MENU_BAR_ALIASES[rawMenuBarMode] || rawMenuBarMode;
+const MENU_BAR_MODE = VALID_MENU_BAR_MODES.includes(resolvedMode) ? resolvedMode : 'auto';
+if (resolvedMode !== rawMenuBarMode) {
+  console.log(`[Frame Fix] CLAUDE_MENU_BAR '${process.env.CLAUDE_MENU_BAR}' resolved to '${resolvedMode}'`);
+} else if (resolvedMode !== MENU_BAR_MODE) {
+  console.warn(`[Frame Fix] Unknown CLAUDE_MENU_BAR value '${process.env.CLAUDE_MENU_BAR}', falling back to 'auto'. Valid: ${VALID_MENU_BAR_MODES.join(', ')}, or 0/1/true/false/yes/no/on/off`);
+}
+console.log(`[Frame Fix] Menu bar mode: ${MENU_BAR_MODE}`);
 
 // Detect if a window intends to be frameless (popup/Quick Entry/About)
 // Quick Entry: titleBarStyle:"", skipTaskbar:true, transparent:true, resizable:false
@@ -75,8 +109,10 @@ Module.prototype.require = function(id) {
             } else {
               // Main window: force native frame
               options.frame = true;
-              // Hide the menu bar by default (Alt key will toggle it)
-              options.autoHideMenuBar = true;
+              // Menu bar behavior depends on CLAUDE_MENU_BAR mode:
+              // 'auto' (default): hidden, Alt toggles
+              // 'visible'/'hidden': no Alt toggle
+              options.autoHideMenuBar = (MENU_BAR_MODE === 'auto');
               // Remove custom titlebar options
               delete options.titleBarStyle;
               delete options.titleBarOverlay;
@@ -86,103 +122,166 @@ Module.prototype.require = function(id) {
           super(options);
 
           if (process.platform === 'linux') {
-            // Hide menu bar after window creation
-            this.setMenuBarVisibility(false);
+            // Hide menu bar after window creation (unless user wants it visible)
+            if (MENU_BAR_MODE !== 'visible') {
+              this.setMenuBarVisibility(false);
+            }
 
             // Inject CSS for Linux scrollbar styling
             this.webContents.on('did-finish-load', () => {
               this.webContents.insertCSS(LINUX_CSS).catch(() => {});
             });
 
-            // Ensure menu bar stays hidden on show events
-            this.on('show', () => {
-              this.setMenuBarVisibility(false);
-            });
+            // In 'hidden' mode, suppress Alt toggle by re-hiding
+            // on every show event. In 'auto' mode, let
+            // autoHideMenuBar handle the toggle natively.
+            if (MENU_BAR_MODE === 'hidden') {
+              this.on('show', () => {
+                this.setMenuBarVisibility(false);
+              });
+            }
 
             if (!popup) {
-              // Patch getContentBounds() to read from getSize() directly,
-              // bypassing Chromium's LayoutManagerBase cache. The cache is
-              // only invalidated via OnWindowStateChanged() -> ScheduleRelayout()
-              // -> InvalidateLayout(), which requires _NET_WM_STATE atom changes.
-              // KWin's corner-snap/quick-tile never sets those atoms, so the
-              // cache stays stale after tiling. getSize() reads from
-              // Widget/platform window bounds updated by X11 ConfigureNotify
-              // before JS events fire, so it always reflects the real geometry.
-              // Under XWayland, frame overhead is 0x0 (WM draws outside app
-              // bounds), so frameW/H will calibrate to zero. Fixes: #239
-              let frameW = 0;
-              let frameH = 0;
-              let calibrated = false;
-              const origGetContentBounds = this.getContentBounds.bind(this);
-
-              this.getContentBounds = () => {
-                if (calibrated && !this.isDestroyed()) {
-                  const [w, h] = this.getSize();
-                  const width = w - frameW;
-                  const height = h - frameH;
-                  // Guard against stale/invalid getSize() data during
-                  // transitions — fall back rather than set child to 0x0.
-                  if (width > 0 && height > 0) {
-                    return { x: 0, y: 0, width, height };
-                  }
+              // Directly set child view bounds to match content size.
+              // This bypasses Chromium's stale LayoutManagerBase cache
+              // (only invalidated via _NET_WM_STATE atom changes, which
+              // KWin corner-snap/quick-tile never sets). Instead of
+              // monkey-patching getContentBounds() (which causes drag
+              // resize jitter at ~60Hz), we only act on discrete state
+              // changes. Fixes: #239
+              const fixChildBounds = () => {
+                if (this.isDestroyed()) return false;
+                const children = this.contentView?.children;
+                if (!children?.length) return false;
+                const [cw, ch] = this.getContentSize();
+                if (cw <= 0 || ch <= 0) return false;
+                const cur = children[0].getBounds();
+                if (cur.width !== cw || cur.height !== ch) {
+                  children[0].setBounds({ x: 0, y: 0, width: cw, height: ch });
+                  return true;
                 }
-                return origGetContentBounds();
+                return false;
               };
 
-              // For maximize/unmaximize/fullscreen, Chromium's layout cache
-              // is definitively stale (no _NET_WM_STATE atoms for quick-tile).
-              // Re-emit resize twice — immediately and after one frame — so
-              // the app's layout handler runs with fresh getSize() data from
-              // our patched getContentBounds(). Not applied to regular drag
-              // resize, which doesn't have the layout-cache staleness problem.
-              const reemitResize = () => {
-                if (this.isDestroyed()) return;
-                this.emit('resize');
-                setTimeout(() => {
-                  if (!this.isDestroyed()) this.emit('resize');
-                }, 16);
+              // Geometry settles in stages after state changes.
+              // Three passes at 0/16/150ms cover immediate, next-frame,
+              // and compositor-animation-complete timing.
+              const fixAfterStateChange = () => {
+                fixChildBounds();
+                setTimeout(fixChildBounds, 16);
+                setTimeout(fixChildBounds, 150);
               };
 
-              this.on('maximize', reemitResize);
-              this.on('unmaximize', reemitResize);
-              this.on('enter-full-screen', reemitResize);
-              this.on('leave-full-screen', reemitResize);
+              // Suppresses resize/moved→fixAfterStateChange cascade
+              // during jiggle. Without this, each setSize triggers the
+              // resize handler, creating 6+ unnecessary timer callbacks.
+              let jiggling = false;
+
+              // Track interactive (user-drag) resizing. will-resize
+              // only fires for user-initiated drags, not programmatic
+              // setSize() or WM-initiated resizes. On Wayland compositors
+              // where will-resize may not fire, the guard stays false —
+              // safe because jiggle only triggers from armed pairs.
+              let userResizing = false;
+              let userResizeTimer = null;
+              this.on('will-resize', () => {
+                userResizing = true;
+                if (userResizeTimer) clearTimeout(userResizeTimer);
+                userResizeTimer = setTimeout(() => { userResizing = false; }, 300);
+              });
+
+              // Debounced 1px jiggle for workspace switches where tile
+              // size is unchanged (bounds match but compositor cache is
+              // stale). Only called from armed-pair handlers, never
+              // from resize/maximize. Same pattern as ready-to-show
+              // but debounced and guarded.
+              // INVARIANT: debounce (100ms) must exceed jiggle duration
+              // (50ms) to prevent overlapping jiggles on rapid workspace
+              // switching. Do not reduce debounce below jiggle timeout.
+              let jiggleTimer = null;
+              const jiggleIfStale = () => {
+                if (jiggleTimer) clearTimeout(jiggleTimer);
+                jiggleTimer = setTimeout(() => {
+                  jiggleTimer = null;
+                  if (this.isDestroyed() || userResizing) return;
+                  if (!fixChildBounds()) {
+                    jiggling = true;
+                    const [w, h] = this.getSize();
+                    this.setSize(w + 1, h);
+                    setTimeout(() => {
+                      if (!this.isDestroyed()) {
+                        this.setSize(w, h);
+                        fixChildBounds();
+                      }
+                      jiggling = false;
+                    }, 50);
+                  }
+                }, 100);
+              };
+
+              for (const evt of ['maximize', 'unmaximize',
+                'enter-full-screen', 'leave-full-screen']) {
+                this.on(evt, fixAfterStateChange);
+              }
+
+              // KWin corner-snap/quick-tile emits 'moved' but not
+              // 'maximize'/'unmaximize'. Guard with a size-change check
+              // so normal window drags (position-only) are ignored.
+              let lastSize = [0, 0];
+              this.on('moved', () => {
+                if (this.isDestroyed() || jiggling) return;
+                const [w, h] = this.getSize();
+                if (w !== lastSize[0] || h !== lastSize[1]) {
+                  lastSize = [w, h];
+                  fixAfterStateChange();
+                }
+              });
+
+              // Tiling WMs (Hyprland, i3, sway) emit 'resize' on
+              // workspace switches with stale getContentBounds()
+              // cache. The size-change guard in fixChildBounds()
+              // prevents unnecessary work during drag resize.
+              // Fixes: #323
+              this.on('resize', () => {
+                if (!jiggling) fixAfterStateChange();
+              });
 
               // ready-to-show fires once per window lifecycle
               this.once('ready-to-show', () => {
-                this.setMenuBarVisibility(false);
+                if (MENU_BAR_MODE !== 'visible') {
+                  this.setMenuBarVisibility(false);
+                }
                 // One-time jiggle for initial layout. Fixes: #84
                 const [w, h] = this.getSize();
                 this.setSize(w + 1, h + 1);
                 setTimeout(() => {
                   if (this.isDestroyed()) return;
                   this.setSize(w, h);
-                  // Calibrate frame overhead after layout stabilizes.
-                  // origGetContentBounds() is accurate at rest; stale data
-                  // only occurs during active geometry operations. Validate
-                  // the result is sane before accepting it.
-                  setTimeout(() => {
-                    if (this.isDestroyed()) return;
-                    const [winW, winH] = this.getSize();
-                    const cb = origGetContentBounds();
-                    const fw = winW - cb.width;
-                    const fh = winH - cb.height;
-                    // Reject if content bounds are zero or overhead is
-                    // implausibly large (would indicate a bad read).
-                    if (cb.width > 0 && cb.height > 0 && fw >= 0 && fh >= 0
-                        && fw < 200 && fh < 200) {
-                      frameW = fw;
-                      frameH = fh;
-                      calibrated = true;
-                    }
-                  }, 100);
+                  fixAfterStateChange();
                 }, 50);
               });
 
-              // Fixes: #149 - KDE Plasma: Window demands attention on Alt+Tab
+              // Tiling WMs signal workspace switches via blur/focus
+              // (Hyprland) or hide/show pairs. Jiggle only fires
+              // when fixChildBounds() finds no mismatch (stale
+              // compositor cache on same-size workspace switch).
+              // Fixes: #323
+              const armPair = (armEvt, fireEvt) => {
+                let armed = false;
+                this.on(armEvt, () => { armed = true; });
+                this.on(fireEvt, () => {
+                  if (armed) {
+                    armed = false;
+                    jiggleIfStale();
+                  }
+                });
+              };
+
               this.on('focus', () => {
-                this.flashFrame(false);
+                this.flashFrame(false); // Fixes: #149
               });
+              armPair('blur', 'focus');
+              armPair('hide', 'show');
             }
 
             console.log('[Frame Fix] Linux patches applied');
@@ -204,12 +303,15 @@ Module.prototype.require = function(id) {
         }
       }
 
-      // Intercept Menu.setApplicationMenu to hide menu bar on Linux
+      // Intercept Menu.setApplicationMenu to hide menu bar on Linux.
+      // In 'hidden' mode, force-hide after every menu update.
+      // In 'auto' mode, only hide initially (autoHideMenuBar handles
+      // Alt toggle — re-hiding here would break that). Fixes: #321
       const originalSetAppMenu = OriginalMenu.setApplicationMenu.bind(OriginalMenu);
       patchedSetApplicationMenu = function(menu) {
         console.log('[Frame Fix] Intercepting setApplicationMenu');
         originalSetAppMenu(menu);
-        if (process.platform === 'linux') {
+        if (process.platform === 'linux' && MENU_BAR_MODE === 'hidden') {
           for (const win of PatchedBrowserWindow.getAllWindows()) {
             if (win.isDestroyed()) continue;
             win.setMenuBarVisibility(false);
@@ -217,6 +319,29 @@ Module.prototype.require = function(id) {
           console.log('[Frame Fix] Menu bar hidden on all windows');
         }
       };
+
+      // Register Ctrl+Q as a global shortcut to quit the app.
+      // The upstream menu has CmdOrCtrl+Q but Electron doesn't fire
+      // menu accelerators when the menu bar is hidden/auto-hide on
+      // Linux. This ensures Ctrl+Q always works. Fixes: #321
+      const registerQuitShortcut = () => {
+        try {
+          if (!result.globalShortcut.isRegistered('CommandOrControl+Q')) {
+            result.globalShortcut.register('CommandOrControl+Q', () => {
+              console.log('[Frame Fix] Ctrl+Q pressed, quitting');
+              result.app.quit();
+            });
+            console.log('[Frame Fix] Ctrl+Q quit shortcut registered');
+          }
+        } catch (e) {
+          console.log('[Frame Fix] Failed to register Ctrl+Q shortcut:', e.message);
+        }
+      };
+      if (result.app.isReady()) {
+        registerQuitShortcut();
+      } else {
+        result.app.once('ready', registerQuitShortcut);
+      }
 
       console.log('[Frame Fix] Patches built successfully');
     }

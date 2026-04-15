@@ -1,0 +1,52 @@
+name: Test Build Artifacts (Reusable)
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test-artifact:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - format: deb
+            artifact: package-amd64-deb
+            container: ""
+          - format: rpm
+            artifact: package-amd64-rpm
+            container: "fedora:42"
+          - format: appimage
+            artifact: package-amd64-appimage
+            container: ""
+
+    name: Validate ${{ matrix.format }} package
+    runs-on: ubuntu-latest
+    container: ${{ matrix.container || '' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/
+
+      - name: Install test dependencies (Fedora)
+        if: matrix.format == 'rpm'
+        run: dnf install -y findutils file nodejs npm
+
+      - name: Install test dependencies (Ubuntu)
+        if: matrix.format != 'rpm'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y file libfuse2 nodejs npm
+
+      - name: Run artifact tests
+        run: |
+          chmod +x tests/test-artifact-${{ matrix.format }}.sh
+          tests/test-artifact-${{ matrix.format }}.sh artifacts/

@@ -74,9 +74,19 @@ appdir=$(dirname "$(readlink -f "$0")")
 # Source shared launcher library
 source "$appdir/usr/lib/claude-desktop/launcher-common.sh"
 
+# Handle --doctor flag before anything else
+if [[ "${1:-}" == '--doctor' ]]; then
+	electron_path="$appdir/usr/lib/node_modules/electron/dist/electron"
+	run_doctor "$electron_path"
+	exit $?
+fi
+
 # Setup logging and environment
 setup_logging || exit 1
 setup_electron_env
+cleanup_orphaned_cowork_daemon
+cleanup_stale_lock
+cleanup_stale_cowork_socket
 
 # Detect display backend
 detect_display_backend

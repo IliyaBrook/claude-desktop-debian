@@ -7,8 +7,9 @@
 
 # Global variables (set by functions, used throughout)
 architecture=''
-distro_family=''  # debian, rpm, or unknown
+distro_family=''  # debian, rpm, nix, or unknown
 claude_download_url=''
+claude_exe_sha256=''
 claude_exe_filename=''
 version=''
 release_tag=''  # Optional release tag (e.g., v1.3.2+claude1.1.799) for unique package versions
@@ -17,6 +18,8 @@ cleanup_action='yes'
 perform_cleanup=false
 test_flags_mode=false
 local_exe_path=''
+node_pty_dir=''
+source_dir=''
 original_user=''
 original_home=''
 project_root=''
@@ -24,6 +27,7 @@ work_dir=''
 app_staging_dir=''
 chosen_electron_module_path=''
 electron_var=''
+electron_var_re=''
 asar_exec=''
 claude_extract_dir=''
 electron_resources_dest=''
@@ -57,6 +61,31 @@ section_footer() {
 	echo -e "\033[1;36m--- End $1 ---\033[0m"
 }
 
+verify_sha256() {
+	local file_path="$1"
+	local expected_hash="$2"
+	local label="${3:-file}"
+
+	if [[ -z $expected_hash ]]; then
+		echo "Warning: No SHA-256 hash for ${label}," \
+			'skipping verification' >&2
+		return 0
+	fi
+
+	echo "Verifying SHA-256 checksum for ${label}..."
+	local actual_hash _
+	read -r actual_hash _ < <(sha256sum "$file_path")
+
+	if [[ $actual_hash != "$expected_hash" ]]; then
+		echo "SHA-256 mismatch for ${label}!" >&2
+		echo "  Expected: $expected_hash" >&2
+		echo "  Actual:   $actual_hash" >&2
+		return 1
+	fi
+
+	echo "SHA-256 verified: ${label}"
+}
+
 #===============================================================================
 # Setup Functions
 #===============================================================================
@@ -75,12 +104,14 @@ detect_architecture() {
 	case "$raw_arch" in
 		x86_64)
 			claude_download_url='https://downloads.claude.ai/releases/win32/x64/1.2278.0/Claude-e5213fcf70d7f16280888f281833a19f6ee13156.exe'
+			claude_exe_sha256='231c005db2c98be7743aa3b2cabc1adb4e0dd8620b930fc52e89d1c304b10def'
 			architecture='amd64'
 			claude_exe_filename='Claude-Setup-x64.exe'
 			echo 'Configured for amd64 (x86_64) build.'
 			;;
 		aarch64)
 			claude_download_url='https://downloads.claude.ai/releases/win32/arm64/1.2278.0/Claude-e5213fcf70d7f16280888f281833a19f6ee13156.exe'
+			claude_exe_sha256='2bb5abac1942825e3f13ce737c816c79fcf7604865e3d4750108aaacd714e623'
 			architecture='arm64'
 			claude_exe_filename='Claude-Setup-arm64.exe'
 			echo 'Configured for arm64 (aarch64) build.'
@@ -111,6 +142,9 @@ detect_distro() {
 		distro_family='rpm'
 		echo "Detected Red Hat-based distribution"
 		echo "  $(cat /etc/redhat-release)"
+	elif [[ -f /etc/NIXOS ]]; then
+		distro_family='nix'
+		echo "Detected NixOS"
 	else
 		distro_family='unknown'
 		echo "Warning: Could not detect distribution family"
@@ -182,12 +216,13 @@ parse_arguments() {
 	case "$distro_family" in
 		debian) build_format='deb' ;;
 		rpm) build_format='rpm' ;;
+		nix) build_format='nix' ;;
 		*) build_format='appimage' ;;
 	esac
 
 	while (( $# > 0 )); do
 		case "$1" in
-			-b|--build|-c|--clean|-e|--exe|-r|--release-tag)
+			-b|--build|-c|--clean|-e|--exe|-r|--release-tag|-s|--source-dir|--node-pty-dir)
 				if [[ -z ${2:-} || $2 == -* ]]; then
 					echo "Error: Argument for $1 is missing" >&2
 					exit 1
@@ -197,6 +232,8 @@ parse_arguments() {
 					-c|--clean) cleanup_action="$2" ;;
 					-e|--exe) local_exe_path="$2" ;;
 					-r|--release-tag) release_tag="$2" ;;
+					-s|--source-dir) source_dir="$2" ;;
+					--node-pty-dir) node_pty_dir="$2" ;;
 				esac
 				shift 2
 				;;
@@ -205,11 +242,13 @@ parse_arguments() {
 				shift
 				;;
 			-h|--help)
-				echo "Usage: $0 [--build deb|rpm|appimage] [--clean yes|no] [--exe /path/to/installer.exe] [--release-tag TAG] [--test-flags]"
-				echo '  --build: Specify the build format (deb, rpm, or appimage).'
+				echo "Usage: $0 [--build deb|rpm|appimage|nix] [--clean yes|no] [--exe /path/to/installer.exe] [--source-dir /path] [--release-tag TAG] [--test-flags]"
+				echo '  --build: Specify the build format (deb, rpm, appimage, or nix).'
 				echo "           Default: auto-detected based on distro (current: $build_format)"
 				echo '  --clean: Specify whether to clean intermediate build files (yes or no). Default: yes'
 				echo '  --exe:   Use a local Claude installer exe instead of downloading'
+				echo '  --source-dir: Path to repo root for scripts/ and assets (default: project root)'
+				echo '  --node-pty-dir: Path to pre-built node-pty package (skips npm install)'
 				echo '  --release-tag: Release tag (e.g., v1.3.2+claude1.1.799) to append wrapper version to package'
 				echo '  --test-flags: Parse flags, print results, and exit without building.'
 				exit 0
@@ -222,12 +261,24 @@ parse_arguments() {
 		esac
 	done
 
+	# source_dir is where scripts/assets live (default: project_root)
+	source_dir="${source_dir:-$project_root}"
+
 	# Validate arguments
 	build_format="${build_format,,}"
 	cleanup_action="${cleanup_action,,}"
 
-	if [[ $build_format != 'deb' && $build_format != 'rpm' && $build_format != 'appimage' ]]; then
-		echo "Invalid build format specified: '$build_format'. Must be 'deb', 'rpm', or 'appimage'." >&2
+	if [[ ! -d $source_dir ]]; then
+		echo "Error: --source-dir path does not exist: $source_dir" >&2
+		exit 1
+	fi
+	if [[ -n $node_pty_dir && ! -d $node_pty_dir ]]; then
+		echo "Error: --node-pty-dir path does not exist: $node_pty_dir" >&2
+		exit 1
+	fi
+
+	if [[ $build_format != 'deb' && $build_format != 'rpm' && $build_format != 'appimage' && $build_format != 'nix' ]]; then
+		echo "Invalid build format specified: '$build_format'. Must be 'deb', 'rpm', 'appimage', or 'nix'." >&2
 		exit 1
 	fi
 
@@ -400,6 +451,21 @@ setup_nodejs() {
 		exit 1
 	fi
 
+	# Verify against official Node.js checksums
+	local shasums_url node_expected_sha256
+	shasums_url="https://nodejs.org/dist/v${node_version_to_install}/SHASUMS256.txt"
+	node_expected_sha256=$(
+		wget -qO- "$shasums_url" \
+			| grep -F "$node_tarball" \
+			| awk '{print $1}'
+	) || true
+
+	if ! verify_sha256 "$work_dir/$node_tarball" \
+		"$node_expected_sha256" 'Node.js tarball'; then
+		cd "$project_root" || exit 1
+		exit 1
+	fi
+
 	echo 'Extracting Node.js...'
 	if ! tar -xf "$node_tarball"; then
 		echo 'Failed to extract Node.js tarball' >&2
@@ -508,6 +574,11 @@ download_claude_installer() {
 			exit 1
 		fi
 		echo "Download complete: $claude_exe_filename"
+
+		if ! verify_sha256 "$claude_exe_path" \
+			"$claude_exe_sha256" 'Claude Desktop installer'; then
+			exit 1
+		fi
 	fi
 
 	echo "Extracting resources from $claude_exe_filename into separate directory..."
@@ -579,7 +650,7 @@ patch_app_asar() {
 	original_main=$(node -e "const pkg = require('./app.asar.contents/package.json'); console.log(pkg.main);")
 	echo "Original main entry: $original_main"
 
-	cp "$project_root/scripts/frame-fix-wrapper.js" app.asar.contents/frame-fix-wrapper.js || exit 1
+	cp "$source_dir/scripts/frame-fix-wrapper.js" app.asar.contents/frame-fix-wrapper.js || exit 1
 
 	cat > app.asar.contents/frame-fix-entry.js << EOFENTRY
 // Load frame fix first
@@ -609,11 +680,16 @@ console.log('Updated package.json: main entry and node-pty dependency');
 	# Create stub native module
 	echo 'Creating stub native module...'
 	mkdir -p app.asar.contents/node_modules/@ant/claude-native || exit 1
-	cp "$project_root/scripts/claude-native-stub.js" \
+	cp "$source_dir/scripts/claude-native-stub.js" \
 		app.asar.contents/node_modules/@ant/claude-native/index.js || exit 1
 
 	mkdir -p app.asar.contents/resources/i18n || exit 1
 	cp "$claude_extract_dir/lib/net45/resources/"*-*.json app.asar.contents/resources/i18n/ || exit 1
+
+	# Copy tray icons into asar so both packaged (process.resourcesPath)
+	# and unpackaged (app.getAppPath()) code paths can find them
+	cp "$claude_extract_dir/lib/net45/resources/Tray"* app.asar.contents/resources/ 2>/dev/null || \
+		echo 'Warning: No tray icon files found for asar inclusion'
 
 	# Patch title bar detection
 	patch_titlebar_detection
@@ -644,7 +720,7 @@ console.log('Updated package.json: main entry and node-pty dependency');
 
 	# Copy cowork VM service daemon for Linux Cowork mode
 	echo 'Installing cowork VM service daemon...'
-	cp "$project_root/scripts/cowork-vm-service.js" \
+	cp "$source_dir/scripts/cowork-vm-service.js" \
 		app.asar.contents/cowork-vm-service.js || exit 1
 	echo 'Cowork VM service daemon installed'
 
@@ -693,10 +769,10 @@ extract_electron_variable() {
 	echo 'Extracting electron module variable name...'
 	local index_js='app.asar.contents/.vite/build/index.js'
 
-	electron_var=$(grep -oP '\b\w+(?=\s*=\s*require\("electron"\))' \
+	electron_var=$(grep -oP '\$?\w+(?=\s*=\s*require\("electron"\))' \
 		"$index_js" | head -1)
 	if [[ -z $electron_var ]]; then
-		electron_var=$(grep -oP '(?<=new )\w+(?=\.Tray\b)' \
+		electron_var=$(grep -oP '(?<=new )\$?\w+(?=\.Tray\b)' \
 			"$index_js" | head -1)
 	fi
 	if [[ -z $electron_var ]]; then
@@ -704,6 +780,7 @@ extract_electron_variable() {
 		cd "$project_root" || exit 1
 		exit 1
 	fi
+	electron_var_re="${electron_var//\$/\\$}"
 	echo "  Found electron variable: $electron_var"
 	echo '##############################################################'
 }
@@ -714,9 +791,9 @@ fix_native_theme_references() {
 
 	local wrong_refs
 	mapfile -t wrong_refs < <(
-		grep -oP '\b\w+(?=\.nativeTheme)' "$index_js" \
+		grep -oP '\$?\w+(?=\.nativeTheme)' "$index_js" \
 			| sort -u \
-			| grep -v "^${electron_var}$" || true
+			| grep -Fxv "$electron_var" || true
 	)
 
 	if (( ${#wrong_refs[@]} == 0 )); then
@@ -725,11 +802,12 @@ fix_native_theme_references() {
 		return
 	fi
 
-	local ref
+	local ref ref_re
 	for ref in "${wrong_refs[@]}"; do
 		echo "  Replacing: $ref.nativeTheme -> $electron_var.nativeTheme"
+		ref_re="${ref//\$/\\$}"
 		sed -i -E \
-			"s/\b${ref}\.nativeTheme/${electron_var}.nativeTheme/g" \
+			"s/${ref_re}\.nativeTheme/${electron_var_re}.nativeTheme/g" \
 			"$index_js"
 	done
 	echo '##############################################################'
@@ -794,10 +872,10 @@ patch_tray_menu_handler() {
 	echo 'Patching nativeTheme handler for startup delay...'
 	if ! grep -q '_trayStartTime' "$index_js"; then
 		sed -i -E \
-			"s/(${electron_var}\.nativeTheme\.on\(\s*\"updated\"\s*,\s*\(\)\s*=>\s*\{)/let _trayStartTime=Date.now();\1/g" \
+			"s/(${electron_var_re}\.nativeTheme\.on\(\s*\"updated\"\s*,\s*\(\)\s*=>\s*\{)/let _trayStartTime=Date.now();\1/g" \
 			"$index_js"
 		sed -i -E \
-			"s/\((\w+)\(\)\s*,\s*${tray_func}\(\)\s*,/(\1(),Date.now()-_trayStartTime>3e3\&\&${tray_func}(),/g" \
+			"s/\((\w+\([^)]*\))\s*,\s*${tray_func}\(\)\s*,/(\1,Date.now()-_trayStartTime>3e3\&\&${tray_func}(),/g" \
 			"$index_js"
 		echo '  Added startup delay check (3 second window)'
 	fi
@@ -807,11 +885,11 @@ patch_tray_menu_handler() {
 patch_tray_icon_selection() {
 	echo 'Patching tray icon selection for Linux visibility...'
 	local index_js='app.asar.contents/.vite/build/index.js'
-	local dark_check="$electron_var.nativeTheme.shouldUseDarkColors"
+	local dark_check="${electron_var_re}.nativeTheme.shouldUseDarkColors"
 
-	if grep -qP ':\w="TrayIconTemplate\.png"' "$index_js"; then
+	if grep -qP ':\$?\w+="TrayIconTemplate\.png"' "$index_js"; then
 		sed -i -E \
-			"s/:(\w)=\"TrayIconTemplate\.png\"/:\1=${dark_check}?\"TrayIconTemplate-Dark.png\":\"TrayIconTemplate.png\"/g" \
+			"s/:(\\\$?\w+)=\"TrayIconTemplate\.png\"/:\1=${dark_check}?\"TrayIconTemplate-Dark.png\":\"TrayIconTemplate.png\"/g" \
 			"$index_js"
 		echo 'Patched tray icon selection for Linux theme support'
 	else
@@ -848,35 +926,144 @@ patch_menu_bar_default() {
 }
 
 patch_quick_window() {
-	if ! grep -q 'e.blur(),e.hide()' app.asar.contents/.vite/build/index.js; then
-		sed -i 's/e.hide()/e.blur(),e.hide()/' app.asar.contents/.vite/build/index.js
-		echo 'Added blur() call to fix quick window submit issue'
+	echo 'Patching quick window for Linux...'
+	local index_js='app.asar.contents/.vite/build/index.js'
+
+	# Extract the quick window variable name from the unique "pop-up-menu"
+	# setAlwaysOnTop call, e.g.: Sa.setAlwaysOnTop(!0,"pop-up-menu")
+	local quick_var
+	quick_var=$(grep -oP '\w+(?=\.setAlwaysOnTop\(\s*!0\s*,\s*"pop-up-menu"\))' \
+		"$index_js" | head -1)
+	if [[ -z $quick_var ]]; then
+		echo 'WARNING: Could not extract quick window variable name'
+		echo '##############################################################'
+		return
 	fi
+	echo "  Found quick window variable: $quick_var"
+
+	local quick_var_re="${quick_var//\$/\\$}"
+
+	# Part 1: Add blur() before hide() on the quick window so that
+	# isFocused() returns false after hiding (Electron Linux bug).
+	# The hide call sits after || (e.g. GUARD()||VAR.hide()), so both
+	# calls must be wrapped in parens to preserve short-circuit semantics.
+	if grep -qP "${quick_var_re}\.blur\(\),${quick_var_re}\.hide\(\)" \
+		"$index_js"; then
+		echo '  Quick window blur already patched'
+	elif grep -qP "\|\|${quick_var_re}\.hide\(\)" "$index_js"; then
+		sed -i \
+			"s/||${quick_var_re}\.hide()/||(${quick_var_re}.blur(),${quick_var_re}.hide())/g" \
+			"$index_js"
+		echo '  Added blur() before hide() on quick window'
+	else
+		echo '  WARNING: Could not find quick window hide() call'
+	fi
+
+	# Part 2: Fix main window not appearing after quick entry submit.
+	# On Linux, isFocused() can return stale true after hiding, causing
+	# FOCUS_CHECK()||Lt.show() to skip the show. Replace the focus check
+	# with the visibility check in quick entry code paths.
+	if INDEX_JS="$index_js" node << 'QUICK_WINDOW_PATCH'
+const fs = require('fs');
+const indexJs = process.env.INDEX_JS;
+let code = fs.readFileSync(indexJs, 'utf8');
+let patchCount = 0;
+
+// Find the minified isWindowFocused function via its named property
+// export: isWindowFocused: () => !!NAME()
+const focusedPropRe = /isWindowFocused:\s*\(\)\s*=>\s*!!(\w+)\(\)/;
+const focusedMatch = code.match(focusedPropRe);
+if (!focusedMatch) {
+    console.log('  WARNING: Could not find isWindowFocused function');
+    process.exit(0);
+}
+const focusFn = focusedMatch[1];
+console.log('  Found focus check function: ' + focusFn);
+
+// Find the sibling isVisible function defined near the focus function
+const focusFnIdx = code.indexOf('function ' + focusFn + '(');
+const nearbyCode = code.substring(focusFnIdx, focusFnIdx + 500);
+const visFnRe = /function (\w+)\(\)\{return!\w+\|\|\w+\.isDestroyed\(\)\?!1:\w+\.isVisible\(\)/;
+const visMatch = nearbyCode.match(visFnRe);
+if (!visMatch) {
+    console.log('  WARNING: Could not find visibility function near ' +
+        focusFn);
+    process.exit(0);
+}
+const visFn = visMatch[1];
+console.log('  Found visibility check function: ' + visFn);
+
+// Anchor on unique QuickEntry log strings to patch only the right sites
+const anchors = [
+    'Navigating to existing chat',
+    'Creating new chat with submit_quick_entry',
+];
+for (const anchor of anchors) {
+    const anchorIdx = code.indexOf(anchor);
+    if (anchorIdx === -1) {
+        console.log('  WARNING: anchor not found: ' + anchor);
+        continue;
+    }
+    // Search region after anchor (1500 chars covers promise chains)
+    const region = code.substring(anchorIdx, anchorIdx + 1500);
+    const showRe = new RegExp(
+        focusFn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') +
+        '\\(\\)\\|\\|(\\w+)\\.show\\(\\)'
+    );
+    const showMatch = region.match(showRe);
+    if (showMatch) {
+        const oldStr = showMatch[0];
+        const mainWin = showMatch[1];
+        const newStr = visFn + '()||' + mainWin + '.show()';
+        if (oldStr !== newStr) {
+            const absIdx = anchorIdx + region.indexOf(oldStr);
+            code = code.substring(0, absIdx) + newStr +
+                code.substring(absIdx + oldStr.length);
+            console.log('  Replaced ' + focusFn + '() with ' + visFn +
+                '() for show() near "' + anchor.substring(0, 30) + '..."');
+            patchCount++;
+        }
+    } else {
+        console.log('  WARNING: show() pattern not found near "' +
+            anchor + '"');
+    }
+}
+
+if (patchCount > 0) {
+    fs.writeFileSync(indexJs, code);
+    console.log('  Patched ' + patchCount +
+        ' quick entry show() calls to use visibility check');
+} else {
+    console.log('  WARNING: No quick entry show() calls patched');
+}
+QUICK_WINDOW_PATCH
+	then
+		echo 'Quick window patches applied'
+	else
+		echo 'WARNING: Quick window show patch failed' >&2
+	fi
+	echo '##############################################################'
 }
 
 patch_linux_claude_code() {
 	local index_js='app.asar.contents/.vite/build/index.js'
-	if grep -q 'if(process.platform==="linux")return [a-zA-Z_$]\+==="arm64"?"linux-arm64":"linux-x64"' "$index_js"; then
+	if grep -q 'process.platform==="linux".*linux-arm64.*linux-x64' "$index_js"; then
 		echo 'Linux claude code binary support already present'
 		return
 	fi
 
-	# v1.1.3541 form: `if(process.platform==="win32")return e==="arm64"?"win32-arm64":"win32-x64";`
-	# The arch variable (usually `e`) is already in scope — reuse it.
-	if sed -i -E 's/(if\(process\.platform==="win32"\)return ([a-zA-Z_$][a-zA-Z0-9_$]*)==="arm64"\?"win32-arm64":"win32-x64";)/\1if(process.platform==="linux")return \2==="arm64"?"linux-arm64":"linux-x64";/' "$index_js" \
-		&& grep -q 'if(process.platform==="linux")return [a-zA-Z_$]\+==="arm64"?"linux-arm64":"linux-x64"' "$index_js"; then
-		echo 'Added support for linux claude code binary (ternary form)'
-		return
+	# New format (Claude >= 1.1.3541): getHostPlatform includes arch detection for win32
+	# Pattern: if(process.platform==="win32")return e==="arm64"?"win32-arm64":"win32-x64";throw new Error(...)
+	if grep -qP 'if\(process\.platform==="win32"\)return \w+==="arm64"\?"win32-arm64":"win32-x64";throw' "$index_js"; then
+		sed -i -E 's/if\(process\.platform==="win32"\)return (\w+)==="arm64"\?"win32-arm64":"win32-x64";throw/if(process.platform==="win32")return \1==="arm64"?"win32-arm64":"win32-x64";if(process.platform==="linux")return \1==="arm64"?"linux-arm64":"linux-x64";throw/' "$index_js"
+		echo 'Added linux claude code support (new arch-aware format)'
+	# Old format (Claude <= 1.1.3363): no arch detection for win32
+	elif grep -q 'if(process.platform==="win32")return"win32-x64";' "$index_js"; then
+		sed -i 's/if(process.platform==="win32")return"win32-x64";/if(process.platform==="win32")return"win32-x64";if(process.platform==="linux")return process.arch==="arm64"?"linux-arm64":"linux-x64";/' "$index_js"
+		echo 'Added linux claude code support (legacy format)'
+	else
+		echo 'Warning: Could not find getHostPlatform pattern to patch for Linux claude code support'
 	fi
-
-	# Legacy form (older upstream): `if(process.platform==="win32")return"win32-x64";`
-	if sed -i 's/if(process.platform==="win32")return"win32-x64";/if(process.platform==="win32")return"win32-x64";if(process.platform==="linux")return process.arch==="arm64"?"linux-arm64":"linux-x64";/' "$index_js" \
-		&& grep -q 'if(process.platform==="linux")return process.arch==="arm64"?"linux-arm64":"linux-x64"' "$index_js"; then
-		echo 'Added support for linux claude code binary (legacy form)'
-		return
-	fi
-
-	echo 'WARNING: could not patch getHostPlatform — pattern not found' >&2
 }
 
 patch_cowork_linux() {
@@ -892,24 +1079,42 @@ patch_cowork_linux() {
 	# All complex patches are done via node to avoid shell escaping issues
 	# with minified JavaScript. Uses unique string anchors and dynamic
 	# variable extraction to be version-agnostic per CLAUDE.md guidelines.
-	if ! INDEX_JS="$index_js" SVC_PATH="cowork-vm-service.js" node << 'COWORK_PATCH'
+	if ! INDEX_JS="$index_js" SVC_PATH="cowork-vm-service.js" \
+		node << 'COWORK_PATCH'
 const fs = require('fs');
 const indexJs = process.env.INDEX_JS;
 let code = fs.readFileSync(indexJs, 'utf8');
 let patchCount = 0;
 
+// Helper: extract a balanced block starting at a delimiter.
+// Returns the substring from open to close (inclusive), or null.
+// Works for {} [] () by specifying the open char.
+function extractBlock(str, startIdx, open = '{') {
+    const close = { '{': '}', '[': ']', '(': ')' }[open];
+    const blockStart = str.indexOf(open, startIdx);
+    if (blockStart === -1) return null;
+    let depth = 1;
+    let pos = blockStart + 1;
+    while (depth > 0 && pos < str.length) {
+        if (str[pos] === open) depth++;
+        else if (str[pos] === close) depth--;
+        pos++;
+    }
+    return depth === 0 ? str.substring(blockStart, pos) : null;
+}
+
 // ============================================================
 // Patch 1: Platform check - allow Linux through fz()
 // Pattern: VAR!=="darwin"&&VAR!=="win32" (unique in platform gate)
-// Anchor: appears before 'Unsupported platform:' string
+// Anchor: appears near 'unsupported_platform' code value
 // ============================================================
 const platformGateRe = /(\w+)(\s*!==\s*"darwin"\s*&&\s*)\1(\s*!==\s*"win32")/g;
 const origCode = code;
 code = code.replace(platformGateRe, (match, varName, mid, end) => {
-    // Only patch the instance near the "Unsupported platform" error
+    // Only patch the instance near the "unsupported_platform" code value
     const matchIdx = origCode.indexOf(match);
     const nearbyText = origCode.substring(matchIdx, matchIdx + 200);
-    if (nearbyText.includes('Unsupported platform')) {
+    if (nearbyText.includes('unsupported_platform') || nearbyText.includes('Unsupported platform')) {
         return `${varName}${mid}${varName}${end}&&${varName}!=="linux"`;
     }
     return match;
@@ -919,7 +1124,7 @@ if (code !== origCode) {
     patchCount++;
 } else {
     // Try without backreference (in case minifier uses different var names)
-    const simpleRe = /(!=="darwin"\s*&&\s*\w+\s*!=="win32")([\s\S]{0,50}Unsupported platform)/;
+    const simpleRe = /(!=="darwin"\s*&&\s*\w+\s*!=="win32")([\s\S]{0,200}unsupported_platform)/;
     const simpleMatch = code.match(simpleRe);
     if (simpleMatch) {
         const varMatch = simpleMatch[0].match(/(\w+)\s*!==\s*"win32"/);
@@ -930,6 +1135,12 @@ if (code !== origCode) {
             patchCount++;
         }
     }
+}
+if (code === origCode) {
+    console.error('FATAL: Failed to patch cowork platform gate for Linux.');
+    console.error('The app will crash at startup without this patch.');
+    console.error('The platform check pattern or nearby anchor text may have changed.');
+    process.exit(1);
 }
 
 // ============================================================
@@ -998,46 +1209,40 @@ if (pipeMatch) {
 }
 
 // ============================================================
-// Patch 4: Bundle manifest - add Linux entries to Ln.files
-// Anchor: find files:{darwin: near rootfs.img checksum pattern
-// Uses empty arrays so C$() returns true (vacuous truth),
-// meaning no downloads are needed for Linux.
+// Patch 4: Bundle manifest - add empty Linux entries to files
+// The linux key MUST exist to prevent TypeError when the app
+// accesses files["linux"]["x64"] during cowork status checks.
+// Empty arrays mean no VM files are downloaded — this is correct
+// because the VM backend is non-functional on Linux (bwrap is
+// the only working backend and doesn't use VM files).
+// Note: [].every() returns true (vacuous truth), so bO() reports
+// "Ready" status. This is intentional — it skips the download.
 // ============================================================
 if (!code.includes('"linux":{') && !code.includes("'linux':{") &&
     !code.includes('linux:{')) {
-    // Find the manifest SHA (40-char hex near files:{)
     const shaRe = /sha\s*:\s*"([a-f0-9]{40})"/;
     const shaMatch = code.match(shaRe);
     if (shaMatch) {
-        // Find 'files:' or 'files :' after the sha
         const shaIdx = code.indexOf(shaMatch[0]);
         const afterSha = code.indexOf('files', shaIdx);
         if (afterSha !== -1 && afterSha - shaIdx < 200) {
-            // Find the opening brace of files object
-            const filesOpen = code.indexOf('{', afterSha);
-            if (filesOpen !== -1) {
-                // Count braces to find the closing of the files object
-                let depth = 1;
-                let pos = filesOpen + 1;
-                while (depth > 0 && pos < code.length) {
-                    if (code[pos] === '{') depth++;
-                    else if (code[pos] === '}') depth--;
-                    pos++;
-                }
-                // pos is just after the closing } of files
-                // Insert linux entry before that closing }
-                const insertPos = pos - 1;
-                const linuxEntry =
-                    ',linux:{x64:[],arm64:[]}';
+            const filesBlock = extractBlock(code, afterSha, '{');
+            if (filesBlock) {
+                const filesEnd = code.indexOf(filesBlock, afterSha)
+                    + filesBlock.length;
+                const insertPos = filesEnd - 1;
+                const linuxEntry = ',linux:{x64:[],arm64:[]}';
                 code = code.substring(0, insertPos) +
                     linuxEntry + code.substring(insertPos);
-                console.log('  Added Linux entries to bundle manifest');
+                console.log('  Added empty Linux entries to' +
+                    ' bundle manifest (VM download disabled)');
                 patchCount++;
             }
         }
     }
-    if (!code.includes('linux:{x64:[]')) {
-        console.log('  WARNING: Could not add Linux bundle manifest entries');
+    if (!code.includes('linux:{x64:')) {
+        console.log('  WARNING: Could not add Linux bundle' +
+            ' manifest entries');
     }
 }
 
@@ -1050,23 +1255,57 @@ if (!code.includes('"linux":{') && !code.includes("'linux':{") &&
 // ============================================================
 // Patch 6: Auto-launch service daemon on first connection attempt
 // Anchor: unique string "VM service not running. The service failed to start."
-// Inject auto-spawn logic before the retry delay in Ma()
+//
+// The retry loop only retries on ENOENT (socket missing). On Linux,
+// stale sockets from a previous session give ECONNREFUSED instead,
+// which causes an immediate throw with no retry or auto-launch.
+//
+// Fix: patch the ENOENT check to also match ECONNREFUSED on Linux,
+// then inject auto-launch before the retry delay.
 // ============================================================
 const serviceErrorStr = 'VM service not running. The service failed to start.';
 const serviceErrorIdx = code.indexOf(serviceErrorStr);
 if (serviceErrorIdx !== -1) {
-    // The retry delay is AFTER the error string in the catch block:
-    //   throw i ? new Error("VM service not running...") : n;
-    //   await new Promise(a=>setTimeout(a,delay))
-    const searchEnd = Math.min(code.length, serviceErrorIdx + 300);
-    const searchRegion = code.substring(serviceErrorIdx, searchEnd);
+    // Step 1: Find the ENOENT check and expand it to include ECONNREFUSED
+    // Pattern: VAR.code==="ENOENT"
+    // Search backwards from the error string to find it
+    const searchStart = Math.max(0, serviceErrorIdx - 300);
+    const beforeRegion = code.substring(searchStart, serviceErrorIdx);
+    const enoentRe = /(\w+)\.code\s*===\s*"ENOENT"/g;
+    let enoentMatch;
+    let lastEnoent = null;
+    while ((enoentMatch = enoentRe.exec(beforeRegion)) !== null) {
+        lastEnoent = enoentMatch;
+    }
+    if (lastEnoent) {
+        const enoentStr = lastEnoent[0];
+        const errVar = lastEnoent[1];
+        const enoentAbsIdx = searchStart + lastEnoent.index;
+        // Replace: VAR.code==="ENOENT"
+        // With:    (VAR.code==="ENOENT"||process.platform==="linux"&&VAR.code==="ECONNREFUSED")
+        const expanded =
+            '(' + enoentStr +
+            '||process.platform==="linux"&&' + errVar + '.code==="ECONNREFUSED")';
+        code = code.substring(0, enoentAbsIdx) +
+            expanded +
+            code.substring(enoentAbsIdx + enoentStr.length);
+        console.log('  Expanded ENOENT check to include ECONNREFUSED on Linux');
+    } else {
+        console.log('  WARNING: Could not find ENOENT check for ECONNREFUSED expansion');
+    }
+
+    // Step 2: Inject auto-launch before the retry delay
+    // Re-find serviceErrorStr since indices shifted after step 1
+    const newServiceErrorIdx = code.indexOf(serviceErrorStr);
+    const searchEnd = Math.min(code.length, newServiceErrorIdx + 300);
+    const searchRegion = code.substring(newServiceErrorIdx, searchEnd);
     const retryMatch = searchRegion.match(
         /await new Promise\((\w+)=>\s*setTimeout\(\1,\s*(\w+)\)\)/
     );
     if (retryMatch) {
         const retryStr = retryMatch[0];
         const retryOffset = searchRegion.indexOf(retryStr);
-        const retryAbsIdx = serviceErrorIdx + retryOffset;
+        const retryAbsIdx = newServiceErrorIdx + retryOffset;
         // Inject auto-launch before the retry delay
         // Service script is in app.asar.unpacked/ (not inside asar, since
         // child_process cannot execute scripts from inside an asar).
@@ -1074,18 +1313,30 @@ if (serviceErrorIdx !== -1) {
         // is the Electron binary - spawn would trigger "file open" handling
         // instead of executing the script as Node.js.
         const svcPath = process.env.SVC_PATH || 'cowork-vm-service.js';
-        // Always try to launch - the service daemon handles dedup
-        // (tests existing socket, exits if active, cleans stale and starts)
-        // Don't check socket existence here since stale sockets cause ECONNREFUSED
+        // Extract the enclosing function name (Ma or whatever it's
+        // minified to) so the dedup guard attaches to it
+        const funcSearchStart = Math.max(0, newServiceErrorIdx - 2000);
+        const funcRegion = code.substring(funcSearchStart, newServiceErrorIdx);
+        // The function is defined as: async function NAME(t,e){...for(let r=0;r<=LIMIT;r++)
+        const funcNameRe = /async function (\w+)\s*\(\s*\w+\s*,\s*\w+\s*\)\s*\{[\s\S]*?for\s*\(\s*let/g;
+        let funcMatch;
+        let retryFuncName = null;
+        while ((funcMatch = funcNameRe.exec(funcRegion)) !== null) {
+            retryFuncName = funcMatch[1];
+        }
+        const svcLaunchedGuard = retryFuncName
+            ? retryFuncName + '._svcLaunched'
+            : '_globalSvcLaunched';
         const autoLaunch =
-            'process.platform==="linux"&&!Ma._svcLaunched&&(Ma._svcLaunched=true,' +
+            'process.platform==="linux"&&!' + svcLaunchedGuard + '&&(' + svcLaunchedGuard + '=true,' +
             '(()=>{try{' +
             'const _d=require("path").join(process.resourcesPath,' +
             '"app.asar.unpacked","' + svcPath + '");' +
             'if(require("fs").existsSync(_d)){' +
             'const _c=require("child_process").fork(_d,[],' +
             '{detached:true,stdio:"ignore",env:{...process.env,' +
-            'ELECTRON_RUN_AS_NODE:"1"}});_c.unref()}' +
+            'ELECTRON_RUN_AS_NODE:"1"}});' +
+            'global.__coworkDaemonPid=_c.pid;_c.unref()}' +
             '}catch(_e){console.error("[cowork-autolaunch]",_e)}})()),';
         code = code.substring(0, retryAbsIdx) +
             autoLaunch + code.substring(retryAbsIdx);
@@ -1104,9 +1355,204 @@ if (serviceErrorIdx !== -1) {
 // No change needed - win32-gated code is skipped on Linux.
 // ============================================================
 
+// ============================================================
+// Patch 8: VM download tmpdir fix for Linux
+// On Linux, os.tmpdir() returns /tmp which is often a small
+// tmpfs (3-4GB). The VM rootfs download decompresses to ~9GB,
+// causing ENOSPC. Patch to use the bundle directory (on real
+// disk) instead of tmpfs for the download temp files.
+// Anchor: unique string "wvm-" in mkdtemp call
+// Strategy: find the bundle dir variable from nearby mkdir(),
+// then replace tmpdir() with that variable in the mkdtemp call.
+// ============================================================
+{
+    // Find: MKDTEMP(PATH.join(OS.tmpdir(), "wvm-"))
+    // The bundle dir var is used in mkdir(VAR, ...) just before
+    const mkdtempRe = /(\w+)\.mkdtemp\(\s*(\w+)\.join\(\s*(\w+)\.tmpdir\(\)\s*,\s*"wvm-"\s*\)\s*\)/;
+    const mkdtempMatch = code.match(mkdtempRe);
+    if (mkdtempMatch) {
+        const [fullMatch, fsVar, pathVar, osVar] = mkdtempMatch;
+        // Find the bundle dir variable: mkdir(VAR, { recursive before wvm-
+        const mkdtempIdx = code.indexOf(fullMatch);
+        const searchStart = Math.max(0, mkdtempIdx - 2000);
+        const before = code.substring(searchStart, mkdtempIdx);
+        // Look for: mkdir(VARNAME, { recursive
+        const mkdirRe = /(\w+)\.mkdir\(\s*(\w+)\s*,\s*\{\s*recursive/g;
+        let bundleVar = null;
+        let lastMkdir;
+        while ((lastMkdir = mkdirRe.exec(before)) !== null) {
+            bundleVar = lastMkdir[2];
+        }
+        if (bundleVar) {
+            // Replace os.tmpdir() with the bundle dir variable
+            // On Linux, use the bundle dir; on other platforms keep tmpdir
+            const replacement =
+                `${fsVar}.mkdtemp(${pathVar}.join(` +
+                `process.platform==="linux"?${bundleVar}:${osVar}.tmpdir(),` +
+                `"wvm-"))`;
+            code = code.substring(0, mkdtempIdx) + replacement +
+                code.substring(mkdtempIdx + fullMatch.length);
+            console.log('  Patched VM download temp dir to use bundle path on Linux');
+            patchCount++;
+        } else {
+            console.log('  WARNING: Could not find bundle dir variable for tmpdir patch');
+        }
+    } else {
+        console.log('  WARNING: Could not find mkdtemp("wvm-") for tmpdir patch');
+    }
+}
+
+// ============================================================
+// Patch 9: Copy smol-bin VHDX on Linux
+// The win32 block copies smol-bin then calls _.configure()
+// (Windows HCS setup) which causes "Request timed out" on
+// Linux (#315). Inject a separate Linux block after the win32
+// block that only does the smol-bin copy.
+// Variable names are extracted dynamically from the win32 block
+// since minified names change between releases (#344).
+// ============================================================
+{
+    const anchor = '"[VM:start] Windows VM service configured"';
+    const anchorIdx = code.indexOf(anchor);
+    if (anchorIdx !== -1) {
+        // Find the "}" closing the win32 if-block after the anchor
+        const closingBrace = code.indexOf('}', anchorIdx + anchor.length);
+        if (closingBrace !== -1) {
+            // Extract minified variable names from the win32 block
+            // Search backwards from anchor to find the win32 block
+            const regionStart = Math.max(0, anchorIdx - 1000);
+            const region = code.substring(regionStart, anchorIdx);
+
+            // path var: VAR.join(process.resourcesPath,
+            const pathMatch = region.match(
+                /(\w+)\.join\(\s*process\.resourcesPath\s*,/
+            );
+            // fs var: VAR.existsSync(
+            const fsMatch = region.match(/(\w+)\.existsSync\(/);
+            // logger var: VAR.info("[VM:start]
+            const logMatch = region.match(
+                /(\w+)\.info\(\s*[`"]\[VM:start\]/
+            );
+            // stream/pipeline var: VAR.pipeline(
+            const streamMatch = region.match(/(\w+)\.pipeline\(/);
+            // arch function: const VAR=FUNC(), used in smol-bin
+            const archMatch = region.match(
+                /const\s+(\w+)\s*=\s*(\w+)\(\)\s*,\s*\w+\s*=\s*\w+\.join/
+            );
+            // bundlePath var: PATH.join(VAR,"smol-bin.vhdx")
+            const bundleMatch = region.match(
+                /\.join\(\s*(\w+)\s*,\s*"smol-bin\.vhdx"\s*\)/
+            );
+
+            if (pathMatch && fsMatch && logMatch &&
+                streamMatch && archMatch && bundleMatch) {
+                const pathVar = pathMatch[1];
+                const fsVar = fsMatch[1];
+                const logVar = logMatch[1];
+                const streamVar = streamMatch[1];
+                const archFunc = archMatch[2];
+                const bundleVar = bundleMatch[1];
+
+                const linuxBlock =
+                    'if(process.platform==="linux"){' +
+                    'const _la=' + archFunc + '(),' +
+                    '_ls=' + pathVar + '.join(process.resourcesPath,' +
+                        '`smol-bin.${_la}.vhdx`),' +
+                    '_ld=' + pathVar + '.join(' + bundleVar +
+                        ',"smol-bin.vhdx");' +
+                    fsVar + '.existsSync(_ls)?' +
+                    '(' + logVar + '.info(' +
+                        '`[VM:start] Copying smol-bin.${_la}' +
+                        '.vhdx to bundle (Linux)`),' +
+                    'await ' + streamVar + '.pipeline(' +
+                        fsVar + '.createReadStream(_ls),' +
+                        fsVar + '.createWriteStream(_ld)),' +
+                    logVar + '.info(' +
+                        '`[VM:start] smol-bin.${_la}' +
+                        '.vhdx copied successfully`))' +
+                    ':' + logVar + '.warn(' +
+                        '`[VM:start] smol-bin.${_la}' +
+                        '.vhdx not found at ${_ls}`)' +
+                    '}';
+                code = code.substring(0, closingBrace + 1) +
+                    linuxBlock +
+                    code.substring(closingBrace + 1);
+                console.log('  Injected Linux smol-bin copy block (skips _.configure)');
+                console.log(`    vars: path=${pathVar} fs=${fsVar} log=${logVar} stream=${streamVar} arch=${archFunc} bundle=${bundleVar}`);
+                patchCount++;
+            } else {
+                const missing = [];
+                if (!pathMatch) missing.push('path');
+                if (!fsMatch) missing.push('fs');
+                if (!logMatch) missing.push('logger');
+                if (!streamMatch) missing.push('stream');
+                if (!archMatch) missing.push('arch');
+                if (!bundleMatch) missing.push('bundlePath');
+                console.log(`  WARNING: Could not extract minified variable(s): ${missing.join(', ')}`);
+            }
+        } else {
+            console.log('  WARNING: Could not find closing brace after Windows VM service anchor');
+        }
+    } else {
+        console.log('  WARNING: Could not find Windows VM service anchor for smol-bin patch');
+    }
+}
+
+// ============================================================
+// Patch 10: Register quit handler for cowork daemon cleanup
+// The upstream vm-shutdown handler uses a Swift addon unavailable
+// on Linux. Register our own to SIGTERM the daemon on app quit.
+// ============================================================
+{
+    const quitFnRe = /registerQuitHandler:\s*(\w+)/;
+    const quitFnMatch = code.match(quitFnRe);
+    if (quitFnMatch) {
+        const quitFn = quitFnMatch[1];
+        console.log('  Found registerQuitHandler function: ' + quitFn);
+
+        const quitFnDef = 'function ' + quitFn + '(';
+        const quitFnDefIdx = code.indexOf(quitFnDef);
+        if (quitFnDefIdx !== -1) {
+            const fnBlock = extractBlock(code, quitFnDefIdx, '{');
+            if (fnBlock) {
+                const insertIdx = code.indexOf(fnBlock, quitFnDefIdx) +
+                    fnBlock.length;
+                const shutdownHandler =
+                    'process.platform==="linux"&&' + quitFn + '({' +
+                    'name:"cowork-linux-daemon-shutdown",' +
+                    'fn:async()=>{' +
+                    'const _p=global.__coworkDaemonPid;' +
+                    'if(!_p)return;' +
+                    'try{const _cmd=require("fs").readFileSync(' +
+                    '"/proc/"+_p+"/cmdline","utf8");' +
+                    'if(!_cmd.includes("cowork-vm-service"))return' +
+                    '}catch(_e){return}' +
+                    'try{process.kill(_p,"SIGTERM")}catch(_e){return}' +
+                    'for(let _i=0;_i<50;_i++){' +
+                    'await new Promise(_r=>setTimeout(_r,200));' +
+                    'try{process.kill(_p,0)}catch(_e){return}' +
+                    '}}});';
+                code = code.substring(0, insertIdx) +
+                    shutdownHandler + code.substring(insertIdx);
+                console.log('  Registered Linux cowork daemon quit handler');
+                patchCount++;
+            } else {
+                console.log('  WARNING: Could not find ' + quitFn +
+                    ' function body for quit handler');
+            }
+        } else {
+            console.log('  WARNING: Could not find ' + quitFn +
+                ' function definition');
+        }
+    } else {
+        console.log('  WARNING: Could not find registerQuitHandler' +
+            ' export for quit handler');
+    }
+}
+
 fs.writeFileSync(indexJs, code);
 console.log(`  Applied ${patchCount} cowork patches`);
-if (patchCount < 4) {
+if (patchCount < 5) {
     console.log('  WARNING: Some patches failed - Cowork mode may not work');
 }
 COWORK_PATCH
@@ -1222,28 +1668,40 @@ apply_cu_dispatch_patches() {
 install_node_pty() {
 	section_header 'Installing node-pty for terminal support'
 
-	node_pty_build_dir="$work_dir/node-pty-build"
-	mkdir -p "$node_pty_build_dir" || exit 1
-	cd "$node_pty_build_dir" || exit 1
-	echo '{"name":"node-pty-build","version":"1.0.0","private":true}' > package.json
+	local pty_src_dir=''
 
-	echo 'Installing node-pty (this will compile native module for Linux)...'
-	if npm install node-pty 2>&1; then
-		echo 'node-pty installed successfully'
-
-		if [[ -d $node_pty_build_dir/node_modules/node-pty ]]; then
-			echo 'Copying node-pty JavaScript files into app.asar.contents...'
-			mkdir -p "$app_staging_dir/app.asar.contents/node_modules/node-pty" || exit 1
-			cp -r "$node_pty_build_dir/node_modules/node-pty/lib" \
-				"$app_staging_dir/app.asar.contents/node_modules/node-pty/" || exit 1
-			cp "$node_pty_build_dir/node_modules/node-pty/package.json" \
-				"$app_staging_dir/app.asar.contents/node_modules/node-pty/" || exit 1
-			echo 'node-pty JavaScript files copied'
-		else
-			echo 'node-pty installation directory not found'
-		fi
+	if [[ -n $node_pty_dir ]]; then
+		# Use pre-built node-pty (e.g. from Nix)
+		echo "Using pre-built node-pty from $node_pty_dir"
+		pty_src_dir="$node_pty_dir"
 	else
-		echo 'Failed to install node-pty - terminal features may not work'
+		# Build node-pty from npm
+		node_pty_build_dir="$work_dir/node-pty-build"
+		mkdir -p "$node_pty_build_dir" || exit 1
+		cd "$node_pty_build_dir" || exit 1
+		echo '{"name":"node-pty-build","version":"1.0.0","private":true}' > package.json
+
+		echo 'Installing node-pty (this compiles native module)...'
+		if npm install node-pty 2>&1; then
+			echo 'node-pty installed successfully'
+			pty_src_dir="$node_pty_build_dir/node_modules/node-pty"
+		else
+			echo 'Failed to install node-pty - terminal features may not work'
+		fi
+	fi
+
+	if [[ -n $pty_src_dir && -d $pty_src_dir ]]; then
+		echo 'Copying node-pty JavaScript files into app.asar.contents...'
+		mkdir -p "$app_staging_dir/app.asar.contents/node_modules/node-pty" || exit 1
+		cp -r "$pty_src_dir/lib" \
+			"$app_staging_dir/app.asar.contents/node_modules/node-pty/" || exit 1
+		cp "$pty_src_dir/package.json" \
+			"$app_staging_dir/app.asar.contents/node_modules/node-pty/" || exit 1
+		echo 'node-pty JavaScript files copied'
+	elif [[ -z $pty_src_dir ]]; then
+		echo 'node-pty source directory not set'
+	else
+		echo "node-pty directory not found: $pty_src_dir"
 	fi
 
 	cd "$app_staging_dir" || exit 1
@@ -1254,20 +1712,27 @@ finalize_app_asar() {
 	"$asar_exec" pack app.asar.contents app.asar || exit 1
 
 	mkdir -p "$app_staging_dir/app.asar.unpacked/node_modules/@ant/claude-native" || exit 1
-	cp "$project_root/scripts/claude-native-stub.js" \
+	cp "$source_dir/scripts/claude-native-stub.js" \
 		"$app_staging_dir/app.asar.unpacked/node_modules/@ant/claude-native/index.js" || exit 1
 
 	# Copy cowork VM service daemon (must be unpacked for child_process.fork)
 	echo 'Copying cowork VM service daemon to unpacked directory...'
-	cp "$project_root/scripts/cowork-vm-service.js" \
+	cp "$source_dir/scripts/cowork-vm-service.js" \
 		"$app_staging_dir/app.asar.unpacked/cowork-vm-service.js" || exit 1
 	echo 'Cowork VM service daemon copied to unpacked'
 
 	# Copy node-pty native binaries
-	if [[ -d $node_pty_build_dir/node_modules/node-pty/build/Release ]]; then
+	local pty_release_dir=''
+	if [[ -n $node_pty_dir && -d $node_pty_dir/build/Release ]]; then
+		pty_release_dir="$node_pty_dir/build/Release"
+	elif [[ -n $node_pty_build_dir && -d $node_pty_build_dir/node_modules/node-pty/build/Release ]]; then
+		pty_release_dir="$node_pty_build_dir/node_modules/node-pty/build/Release"
+	fi
+
+	if [[ -n $pty_release_dir ]]; then
 		echo 'Copying node-pty native binaries to unpacked directory...'
 		mkdir -p "$app_staging_dir/app.asar.unpacked/node_modules/node-pty/build/Release" || exit 1
-		cp -r "$node_pty_build_dir/node_modules/node-pty/build/Release/"* \
+		cp -r "$pty_release_dir/"* \
 			"$app_staging_dir/app.asar.unpacked/node_modules/node-pty/build/Release/" || exit 1
 		chmod +x "$app_staging_dir/app.asar.unpacked/node_modules/node-pty/build/Release/"* 2>/dev/null || true
 		echo 'node-pty native binaries copied'
@@ -1397,12 +1862,79 @@ copy_locale_files() {
 	echo "app.asar processed and staged in $app_staging_dir"
 }
 
+copy_ssh_helpers() {
+	section_header 'SSH Helpers'
+
+	local ssh_src="$claude_extract_dir/lib/net45/resources/claude-ssh"
+	local ssh_dest="$electron_resources_dest/claude-ssh"
+	local binary_name="claude-ssh-linux-$architecture"
+
+	if [[ ! -d "$ssh_src" ]]; then
+		echo "Warning: SSH helpers not found at $ssh_src"
+		section_footer 'SSH Helpers'
+		return
+	fi
+
+	mkdir -p "$ssh_dest" || exit 1
+	cp "$ssh_src/version.txt" "$ssh_dest/" || exit 1
+	cp "$ssh_src/$binary_name" "$ssh_dest/" || exit 1
+	chmod +x "$ssh_dest/$binary_name"
+
+	echo "Copied SSH helper files:"
+	echo "  version.txt"
+	echo "  $binary_name"
+
+	section_footer 'SSH Helpers'
+}
+
+copy_cowork_resources() {
+	section_header 'Cowork Resources'
+
+	local resources_src="$claude_extract_dir/lib/net45/resources"
+
+	# Copy cowork-plugin-shim.sh (used by app for MCP plugin sandboxing)
+	local shim_src="$resources_src/cowork-plugin-shim.sh"
+	if [[ -f $shim_src ]]; then
+		cp "$shim_src" "$electron_resources_dest/cowork-plugin-shim.sh"
+		chmod +x "$electron_resources_dest/cowork-plugin-shim.sh"
+		echo "Copied cowork-plugin-shim.sh"
+	else
+		echo "Warning: cowork-plugin-shim.sh not found at $shim_src"
+	fi
+
+	# Copy smol-bin VHDX (contains SDK binaries for KVM guest VM).
+	# The app copies this from resources to the bundle dir at startup
+	# (win32-gated; our index.js patch extends this to Linux).
+	# App looks for smol-bin.{arch}.vhdx where arch is x64 or arm64.
+	local smol_arch='x64'
+	if [[ $architecture == 'arm64' ]]; then
+		smol_arch='arm64'
+	fi
+	local smol_vhdx="$resources_src/smol-bin.${smol_arch}.vhdx"
+	if [[ -f $smol_vhdx ]]; then
+		cp "$smol_vhdx" \
+			"$electron_resources_dest/smol-bin.${smol_arch}.vhdx"
+		echo "Copied smol-bin.${smol_arch}.vhdx"
+	else
+		echo "Warning: smol-bin VHDX not found at $smol_vhdx"
+		echo "KVM Cowork will rely on virtiofs for SDK access"
+	fi
+
+	section_footer 'Cowork Resources'
+}
+
 #===============================================================================
 # Packaging Functions
 #===============================================================================
 
 run_packaging() {
 	section_header 'Call Packaging Script'
+
+	if [[ $build_format == 'nix' ]]; then
+		echo 'Nix build mode - skipping packaging (Nix derivation handles installation)'
+		section_footer 'Call Packaging Script'
+		return 0
+	fi
 
 	local output_path=''
 	local script_name file_pattern pkg_file
@@ -1574,21 +2106,47 @@ main() {
 		exit 0
 	fi
 
-	check_dependencies
+	if [[ $build_format != 'nix' ]]; then
+		check_dependencies
+	fi
 	setup_work_directory
-	setup_nodejs
-	setup_electron_asar
+
+	if [[ $build_format != 'nix' ]]; then
+		setup_nodejs
+		setup_electron_asar
+	else
+		# Nix provides node and asar in PATH
+		asar_exec=$(command -v asar)
+		if [[ -z $asar_exec ]]; then
+			echo 'Error: asar not found in PATH (expected Nix to provide it)' >&2
+			exit 1
+		fi
+	fi
 
 	# Phase 2: Download and extract
+	if [[ $build_format == 'nix' && -z $local_exe_path ]]; then
+		echo 'Error: --exe is required when --build nix is specified' >&2
+		exit 1
+	fi
 	download_claude_installer
 
 	# Phase 3: Patch and prepare
 	patch_app_asar
 	install_node_pty
 	finalize_app_asar
-	stage_electron
+	if [[ $build_format != 'nix' ]]; then
+		stage_electron
+		copy_locale_files
+	else
+		# Nix installPhase handles Electron staging and locale files.
+		# Set a resources destination so process_icons and copy_ssh_helpers
+		# have somewhere to write; the Nix installPhase picks them up.
+		electron_resources_dest="$app_staging_dir/nix-resources"
+		mkdir -p "$electron_resources_dest" || exit 1
+	fi
 	process_icons
-	copy_locale_files
+	copy_ssh_helpers
+	copy_cowork_resources
 
 	cd "$project_root" || exit 1
 
@@ -1599,7 +2157,9 @@ main() {
 	cleanup_build
 
 	echo 'Build process finished.'
-	print_next_steps
+	if [[ $build_format != 'nix' ]]; then
+		print_next_steps
+	fi
 }
 
 # Run main with all script arguments

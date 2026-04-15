@@ -35,7 +35,7 @@ install_apt_package() {
 	fi
 
 	log "Installing $pkg via apt..."
-	if sudo apt-get install -y -qq "$pkg" >> "$log_file" 2>&1; then
+	if sudo -n apt-get install -y -qq "$pkg" >> "$log_file" 2>&1; then
 		installed+=("$cmd")
 		return 0
 	else
@@ -60,7 +60,7 @@ install_imagemagick() {
 	fi
 
 	log 'Installing imagemagick via apt...'
-	if sudo apt-get install -y -qq imagemagick >> "$log_file" 2>&1; then
+	if sudo -n apt-get install -y -qq imagemagick >> "$log_file" 2>&1; then
 		installed+=('imagemagick')
 		return 0
 	else
@@ -87,8 +87,8 @@ install_node() {
 	log 'Installing Node.js v20 via NodeSource...'
 
 	# Add NodeSource repository for Node.js 20
-	if curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - >> "$log_file" 2>&1; then
-		if sudo apt-get install -y -qq nodejs >> "$log_file" 2>&1; then
+	if curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -n -E bash - >> "$log_file" 2>&1; then
+		if sudo -n apt-get install -y -qq nodejs >> "$log_file" 2>&1; then
 			installed+=('node')
 			return 0
 		fi
@@ -100,8 +100,14 @@ install_node() {
 }
 
 main() {
+	# Use sudo -n (non-interactive) to avoid blocking on password
+	# prompts in contexts where the user can't respond (hooks, etc).
 	log 'Updating apt cache...'
-	sudo apt-get update -qq >> "$log_file" 2>&1
+	if ! sudo -n apt-get update -qq >> "$log_file" 2>&1; then
+		log 'sudo not available without password, skipping installs'
+		printf 'Skipped build tool installation (sudo requires password)\n'
+		return 0
+	fi
 
 	# Extraction tools
 	install_apt_package '7z' 'p7zip-full'
@@ -118,8 +124,8 @@ main() {
 	if ! dpkg -l libfuse2 &>/dev/null && ! dpkg -l libfuse2t64 &>/dev/null; then
 		log 'Installing libfuse2 for AppImage support...'
 		# Try libfuse2t64 first (Ubuntu 24.04+), fall back to libfuse2
-		if ! sudo apt-get install -y -qq libfuse2t64 >> "$log_file" 2>&1; then
-			sudo apt-get install -y -qq libfuse2 >> "$log_file" 2>&1
+		if ! sudo -n apt-get install -y -qq libfuse2t64 >> "$log_file" 2>&1; then
+			sudo -n apt-get install -y -qq libfuse2 >> "$log_file" 2>&1
 		fi
 		installed+=('libfuse2')
 	else
