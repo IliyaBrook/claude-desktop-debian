@@ -74,13 +74,13 @@ detect_architecture() {
 
 	case "$raw_arch" in
 		x86_64)
-			claude_download_url='https://downloads.claude.ai/releases/win32/x64/1.1.3541/Claude-1e65e4f0a2acc921b2009fc1216fc2b78cd93d18.exe'
+			claude_download_url='https://downloads.claude.ai/releases/win32/x64/1.2278.0/Claude-e5213fcf70d7f16280888f281833a19f6ee13156.exe'
 			architecture='amd64'
 			claude_exe_filename='Claude-Setup-x64.exe'
 			echo 'Configured for amd64 (x86_64) build.'
 			;;
 		aarch64)
-			claude_download_url='https://downloads.claude.ai/releases/win32/arm64/1.1.3541/Claude-1e65e4f0a2acc921b2009fc1216fc2b78cd93d18.exe'
+			claude_download_url='https://downloads.claude.ai/releases/win32/arm64/1.2278.0/Claude-e5213fcf70d7f16280888f281833a19f6ee13156.exe'
 			architecture='arm64'
 			claude_exe_filename='Claude-Setup-arm64.exe'
 			echo 'Configured for arm64 (aarch64) build.'
@@ -855,12 +855,28 @@ patch_quick_window() {
 }
 
 patch_linux_claude_code() {
-	if ! grep -q 'process.arch==="arm64"?"linux-arm64":"linux-x64"' app.asar.contents/.vite/build/index.js; then
-		sed -i 's/if(process.platform==="win32")return"win32-x64";/if(process.platform==="win32")return"win32-x64";if(process.platform==="linux")return process.arch==="arm64"?"linux-arm64":"linux-x64";/' app.asar.contents/.vite/build/index.js
-		echo 'Added support for linux claude code binary'
-	else
+	local index_js='app.asar.contents/.vite/build/index.js'
+	if grep -q 'if(process.platform==="linux")return [a-zA-Z_$]\+==="arm64"?"linux-arm64":"linux-x64"' "$index_js"; then
 		echo 'Linux claude code binary support already present'
+		return
 	fi
+
+	# v1.1.3541 form: `if(process.platform==="win32")return e==="arm64"?"win32-arm64":"win32-x64";`
+	# The arch variable (usually `e`) is already in scope — reuse it.
+	if sed -i -E 's/(if\(process\.platform==="win32"\)return ([a-zA-Z_$][a-zA-Z0-9_$]*)==="arm64"\?"win32-arm64":"win32-x64";)/\1if(process.platform==="linux")return \2==="arm64"?"linux-arm64":"linux-x64";/' "$index_js" \
+		&& grep -q 'if(process.platform==="linux")return [a-zA-Z_$]\+==="arm64"?"linux-arm64":"linux-x64"' "$index_js"; then
+		echo 'Added support for linux claude code binary (ternary form)'
+		return
+	fi
+
+	# Legacy form (older upstream): `if(process.platform==="win32")return"win32-x64";`
+	if sed -i 's/if(process.platform==="win32")return"win32-x64";/if(process.platform==="win32")return"win32-x64";if(process.platform==="linux")return process.arch==="arm64"?"linux-arm64":"linux-x64";/' "$index_js" \
+		&& grep -q 'if(process.platform==="linux")return process.arch==="arm64"?"linux-arm64":"linux-x64"' "$index_js"; then
+		echo 'Added support for linux claude code binary (legacy form)'
+		return
+	fi
+
+	echo 'WARNING: could not patch getHostPlatform — pattern not found' >&2
 }
 
 patch_cowork_linux() {
@@ -1129,12 +1145,28 @@ apply_cu_dispatch_patches() {
 		return 1
 	fi
 
-	# Apply patches in dependency order:
-	#   1. fix_computer_use_tcc       - stub TCC IPC handlers (prevents errors)
-	#   2. fix_computer_use_linux     - Linux executor + platform gate bypass
-	#   3. fix_dispatch_linux         - enable Dispatch feature flags
-	#   4. fix_dispatch_outputs_dir   - fix "Show folder" for dispatch children
+	# Apply patches in dependency order. fix_0_node_host MUST run before
+	# fix_locale_paths (the latter globally rewrites process.resourcesPath).
+	# enable_local_agent_mode MUST run before the CU patches — it registers
+	# computerUse:{status:"supported"} in the feature merger and bypasses the
+	# yukonSilver "Unsupported platform" check that otherwise shows
+	# "Unsupported platform: linux-x64" in the UI.
+	#
+	#   1. fix_0_node_host          - rewrite nodeHost + shellPathWorker paths
+	#   2. fix_locale_paths         - redirect locale lookups to Linux layout
+	#   3. fix_disable_autoupdate   - silence Squirrel update notifications
+	#   4. fix_updater_state_linux  - add version fields to idle updater state
+	#   5. enable_local_agent_mode  - register CU/Cowork features + platform spoofing
+	#   6. fix_computer_use_tcc     - stub TCC IPC handlers
+	#   7. fix_computer_use_linux   - Linux executor + platform gate bypass
+	#   8. fix_dispatch_linux       - enable Dispatch feature flags
+	#   9. fix_dispatch_outputs_dir - fix "Show folder" for dispatch children
 	local patch_scripts=(
+		'fix_0_node_host.py'
+		'fix_locale_paths.py'
+		'fix_disable_autoupdate.py'
+		'fix_updater_state_linux.py'
+		'enable_local_agent_mode.py'
 		'fix_computer_use_tcc.py'
 		'fix_computer_use_linux.py'
 		'fix_dispatch_linux.py'
@@ -1346,10 +1378,16 @@ process_icons() {
 
 copy_locale_files() {
 	local claude_locale_src="$claude_extract_dir/lib/net45/resources"
-	echo 'Copying Claude locale JSON files to Electron resources directory...'
+	# fix_locale_paths.py rewrites process.resourcesPath to
+	#   dirname(app.getAppPath())+"/locales"
+	# so the locale JSON files must live in a "locales" subdirectory next to
+	# app.asar — not directly in the resources root.
+	local locales_dest="$electron_resources_dest/locales"
+	echo "Copying Claude locale JSON files to $locales_dest..."
 	if [[ -d $claude_locale_src ]]; then
-		cp "$claude_locale_src/"*-*.json "$electron_resources_dest/" || exit 1
-		echo 'Claude locale JSON files copied to Electron resources directory'
+		mkdir -p "$locales_dest" || exit 1
+		cp "$claude_locale_src/"*-*.json "$locales_dest/" || exit 1
+		echo 'Claude locale JSON files copied to locales/ subdirectory'
 	else
 		echo "Warning: Claude locale source directory not found at $claude_locale_src"
 	fi
