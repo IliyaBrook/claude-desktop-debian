@@ -227,6 +227,23 @@ function buildMountMap(additionalMounts, mountBinds) {
 }
 
 /**
+ * Find the primary user mount name in mountMap — the first key that
+ * is not a dotfile mount (e.g. .claude, .auto-memory) and not the
+ * uploads mount. Used by both resolveWorkDir (HostBackend) and
+ * BwrapBackend.spawn to derive a sensible cwd from the user-selected
+ * project folder when the Electron app sends a session-root path with
+ * no /mnt/{name} component to translate.
+ *
+ * Returns the mount name (string) or null if no user mount exists.
+ */
+function findPrimaryMount(mountMap) {
+    if (!mountMap) return null;
+    return Object.keys(mountMap).find(
+        n => !n.startsWith('.') && n !== 'uploads',
+    ) || null;
+}
+
+/**
  * Build a merged environment for a spawned process. Combines filtered
  * daemon env with app-provided env, and translates guest paths in
  * CLAUDE_CONFIG_DIR and CLAUDE_COWORK_MEMORY_PATH_OVERRIDE using mountMap.
@@ -392,8 +409,18 @@ function resolveWorkDir(cwd, sharedCwdPath, mountMap) {
             log(`resolveWorkDir: translated "${cwd}" -> "${translated}"`);
             workDir = translated;
         } else {
-            log(`resolveWorkDir: cwd is VM guest path "${cwd}", using home dir`);
-            workDir = os.homedir();
+            // Session-root path (e.g. /sessions/bold-sharp-clarke) has no
+            // /mnt/ component, so translateGuestPath can't resolve it.
+            // Derive cwd from the primary user mount, mirroring what
+            // BwrapBackend does at spawn time.
+            const primaryMount = findPrimaryMount(mountMap);
+            if (primaryMount && mountMap[primaryMount]) {
+                log(`resolveWorkDir: session root "${cwd}", using primary mount "${primaryMount}" -> "${mountMap[primaryMount]}"`);
+                workDir = mountMap[primaryMount];
+            } else {
+                log(`resolveWorkDir: cwd is VM guest path "${cwd}", no primary mount found, using home dir`);
+                workDir = os.homedir();
+            }
         }
     }
 
@@ -1145,9 +1172,7 @@ class BwrapBackend extends LocalBackend {
         );
 
         // Use the primary user mount as cwd (first non-dotfile, non-uploads mount)
-        const primaryMount = Object.keys(mountMap).find(
-            n => !n.startsWith('.') && n !== 'uploads',
-        );
+        const primaryMount = findPrimaryMount(mountMap);
         const guestWorkDir = primaryMount
             ? `${sessionMnt}/${primaryMount}`
             : sessionMnt;
