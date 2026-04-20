@@ -68,13 +68,13 @@ jobs:
           echo "arm64_url=$ARM64_URL" >> $GITHUB_OUTPUT
           echo "claude_version=$CLAUDE_VERSION" >> $GITHUB_OUTPUT
 
-      - name: Get current URLs from build.sh
+      - name: Get current URLs from scripts/setup/detect-host.sh
         id: current_urls
         run: |
-          # Extract current URLs from build.sh
-          # The build.sh case statement uses x86_64/aarch64 patterns with claude_download_url on the next line
-          CURRENT_AMD64_URL=$(grep -E "x86_64\)" -A1 build.sh | grep -oP "claude_download_url='\\K[^']+")
-          CURRENT_ARM64_URL=$(grep -E "aarch64\)" -A1 build.sh | grep -oP "claude_download_url='\\K[^']+")
+          # Extract current URLs from scripts/setup/detect-host.sh
+          # The scripts/setup/detect-host.sh case statement uses x86_64/aarch64 patterns with claude_download_url on the next line
+          CURRENT_AMD64_URL=$(grep -E "x86_64\)" -A1 scripts/setup/detect-host.sh | grep -oP "claude_download_url='\\K[^']+")
+          CURRENT_ARM64_URL=$(grep -E "aarch64\)" -A1 scripts/setup/detect-host.sh | grep -oP "claude_download_url='\\K[^']+")
 
           echo "Current AMD64 URL: $CURRENT_AMD64_URL"
           echo "Current ARM64 URL: $CURRENT_ARM64_URL"
@@ -132,7 +132,7 @@ jobs:
             echo "update_needed=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Update build.sh with new URLs
+      - name: Update scripts/setup/detect-host.sh with new URLs
         if: steps.check_update.outputs.update_needed == 'true'
         run: |
           NEW_AMD64_URL="${{ steps.resolve_urls.outputs.amd64_url }}"
@@ -140,7 +140,7 @@ jobs:
           CURRENT_AMD64_URL="${{ steps.current_urls.outputs.current_amd64_url }}"
           CURRENT_ARM64_URL="${{ steps.current_urls.outputs.current_arm64_url }}"
 
-          echo "Updating build.sh with new URLs..."
+          echo "Updating scripts/setup/detect-host.sh with new URLs..."
 
           # Update AMD64 URL
           if [ -n "$NEW_AMD64_URL" ] && [ "$NEW_AMD64_URL" != "$CURRENT_AMD64_URL" ]; then
@@ -148,7 +148,7 @@ jobs:
             # Escape special characters for sed
             ESCAPED_CURRENT=$(printf '%s\n' "$CURRENT_AMD64_URL" | sed 's/[[\.*^$()+?{|]/\\&/g')
             ESCAPED_NEW=$(printf '%s\n' "$NEW_AMD64_URL" | sed 's/[&/\]/\\&/g')
-            sed -i "s|$ESCAPED_CURRENT|$ESCAPED_NEW|g" build.sh
+            sed -i "s|$ESCAPED_CURRENT|$ESCAPED_NEW|g" scripts/setup/detect-host.sh
           fi
 
           # Update ARM64 URL (if we have a new one)
@@ -156,11 +156,11 @@ jobs:
             echo "Updating ARM64 URL..."
             ESCAPED_CURRENT=$(printf '%s\n' "$CURRENT_ARM64_URL" | sed 's/[[\.*^$()+?{|]/\\&/g')
             ESCAPED_NEW=$(printf '%s\n' "$NEW_ARM64_URL" | sed 's/[&/\]/\\&/g')
-            sed -i "s|$ESCAPED_CURRENT|$ESCAPED_NEW|g" build.sh
+            sed -i "s|$ESCAPED_CURRENT|$ESCAPED_NEW|g" scripts/setup/detect-host.sh
           fi
 
-          echo "Updated build.sh URLs:"
-          grep "claude_download_url=" build.sh
+          echo "Updated scripts/setup/detect-host.sh URLs:"
+          grep "claude_download_url=" scripts/setup/detect-host.sh
 
       - name: Compute SRI hashes for Nix
         if: steps.check_update.outputs.update_needed == 'true'
@@ -189,30 +189,30 @@ jobs:
             echo "arm64_sha256=$ARM64_HEX" >> $GITHUB_OUTPUT
           fi
 
-      - name: Update build.sh SHA-256 checksums
+      - name: Update scripts/setup/detect-host.sh SHA-256 checksums
         if: steps.check_update.outputs.update_needed == 'true'
         run: |
           AMD64_SHA256="${{ steps.nix_hashes.outputs.amd64_sha256 }}"
           ARM64_SHA256="${{ steps.nix_hashes.outputs.arm64_sha256 }}"
 
-          echo "Updating build.sh SHA-256 checksums..."
+          echo "Updating scripts/setup/detect-host.sh SHA-256 checksums..."
 
           # Update AMD64 hash (in x86_64 case block)
           if [ -n "$AMD64_SHA256" ]; then
             sed -i "/x86_64)/,/;;/{
               s/claude_exe_sha256='[^']*'/claude_exe_sha256='$AMD64_SHA256'/
-            }" build.sh
+            }" scripts/setup/detect-host.sh
           fi
 
           # Update ARM64 hash (in aarch64 case block)
           if [ -n "$ARM64_SHA256" ]; then
             sed -i "/aarch64)/,/;;/{
               s/claude_exe_sha256='[^']*'/claude_exe_sha256='$ARM64_SHA256'/
-            }" build.sh
+            }" scripts/setup/detect-host.sh
           fi
 
-          echo "Updated build.sh checksums:"
-          grep "claude_exe_sha256=" build.sh
+          echo "Updated scripts/setup/detect-host.sh checksums:"
+          grep "claude_exe_sha256=" scripts/setup/detect-host.sh
 
       # VM bundle checksums removed — Patch 4 now injects empty linux
       # file arrays since the VM backend is non-functional on Linux.
@@ -268,10 +268,10 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           # Check if there are changes to commit
-          if git diff --quiet build.sh nix/claude-desktop.nix; then
-            echo "No changes to build.sh or nix/claude-desktop.nix"
+          if git diff --quiet scripts/setup/detect-host.sh nix/claude-desktop.nix; then
+            echo "No changes to scripts/setup/detect-host.sh or nix/claude-desktop.nix"
           else
-            git add build.sh nix/claude-desktop.nix
+            git add scripts/setup/detect-host.sh nix/claude-desktop.nix
             git commit -m "$(cat <<COMMIT_MSG
           Update Claude Desktop download URLs to version $CLAUDE_VERSION
 
