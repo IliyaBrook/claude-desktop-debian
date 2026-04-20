@@ -43,11 +43,13 @@ if [[ -d $app_staging_dir/app.asar.unpacked ]]; then
 fi
 echo 'Application files copied to Electron resources directory'
 
-# Copy shared launcher library
+# Copy shared launcher library (launcher-common.sh sources doctor.sh
+# at runtime, so both must live in the same directory)
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$appdir_path/usr/lib/claude-desktop" || exit 1
 cp "$(dirname "$script_dir")/launcher-common.sh" "$appdir_path/usr/lib/claude-desktop/" || exit 1
-echo 'Shared launcher library copied'
+cp "$(dirname "$script_dir")/doctor.sh" "$appdir_path/usr/lib/claude-desktop/" || exit 1
+echo 'Shared launcher library + doctor copied'
 
 # Ensure Electron is bundled within the AppDir for portability
 # Check if electron was copied into the staging dir's node_modules

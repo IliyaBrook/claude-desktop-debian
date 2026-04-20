@@ -198,9 +198,12 @@ stdenvNoCC.mkDerivation {
       fi
     done
 
-    # Install shared launcher library
+    # Install shared launcher library + doctor (launcher-common.sh
+    # sources doctor.sh at runtime, so both must live in the same dir)
     install -Dm755 ${sourceRoot}/scripts/launcher-common.sh \
       $out/lib/claude-desktop/launcher-common.sh
+    install -Dm755 ${sourceRoot}/scripts/doctor.sh \
+      $out/lib/claude-desktop/doctor.sh
 
     # Install .desktop file
     mkdir -p $out/share/applications

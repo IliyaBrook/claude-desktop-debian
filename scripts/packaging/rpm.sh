@@ -217,8 +217,10 @@ cp -r $app_staging_dir/node_modules %{buildroot}/usr/lib/$package_name/
 cp $app_staging_dir/app.asar %{buildroot}/usr/lib/$package_name/node_modules/electron/dist/resources/
 cp -r $app_staging_dir/app.asar.unpacked %{buildroot}/usr/lib/$package_name/node_modules/electron/dist/resources/
 
-# Copy shared launcher library
+# Copy shared launcher library (launcher-common.sh sources doctor.sh
+# at runtime, so both must live in the same directory)
 cp $(dirname "$script_dir")/launcher-common.sh %{buildroot}/usr/lib/$package_name/
+cp $(dirname "$script_dir")/doctor.sh %{buildroot}/usr/lib/$package_name/
 
 # Install desktop entry
 install -Dm 644 $staging_dir/claude-desktop.desktop %{buildroot}/usr/share/applications/claude-desktop.desktop

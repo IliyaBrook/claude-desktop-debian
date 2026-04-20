@@ -66,10 +66,12 @@ cp "$app_staging_dir/app.asar" "$resources_dir/" || exit 1
 cp -r "$app_staging_dir/app.asar.unpacked" "$resources_dir/" || exit 1
 echo 'Application files copied to Electron resources directory'
 
-# Copy shared launcher library
+# Copy shared launcher library (launcher-common.sh sources doctor.sh
+# at runtime, so both must live in the same directory)
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cp "$(dirname "$script_dir")/launcher-common.sh" "$install_dir/lib/$package_name/" || exit 1
-echo 'Shared launcher library copied'
+cp "$(dirname "$script_dir")/doctor.sh" "$install_dir/lib/$package_name/" || exit 1
+echo 'Shared launcher library + doctor copied'
 
 # --- Create Desktop Entry ---
 echo 'Creating desktop entry...'
