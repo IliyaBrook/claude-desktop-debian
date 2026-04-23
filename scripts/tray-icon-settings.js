@@ -79,16 +79,23 @@ class TrayIconSettings extends EventEmitter {
     return migrated;
   }
 
+  // Atomic write via <path>.tmp + renameSync so a kill mid-write
+  // can't truncate the settings file — _load() is soft-fail, but
+  // renameSync on POSIX guarantees the reader sees either the old
+  // content or the fully-written new content, never a partial one.
   _save() {
+    const tmp = this._path + '.tmp';
     try {
       fs.mkdirSync(path.dirname(this._path), { recursive: true });
       fs.writeFileSync(
-        this._path,
+        tmp,
         JSON.stringify({ iconMode: this._mode }, null, 2) + '\n',
         'utf8',
       );
+      fs.renameSync(tmp, this._path);
     } catch (e) {
       console.warn('[Tray Icon] Write failed:', e.message);
+      try { fs.unlinkSync(tmp); } catch (_) { /* ignore */ }
     }
   }
 }

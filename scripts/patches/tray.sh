@@ -234,6 +234,9 @@ patch_tray_icon_submenu() {
 const fs = require('fs');
 const p = 'app.asar.contents/.vite/build/index.js';
 let code = fs.readFileSync(p, 'utf8');
+// NB: [^\\]]*? assumes no radio label inside the submenu contains
+// a literal ']' — true for Auto/Black/White today; revisit the
+// regex (e.g. balanced-brace match) if a future label gains one.
 const prevRe = /\\{label:\"Icon color[^\"]*\",submenu:\\[[^\\]]*?\\]\\},/;
 if (prevRe.test(code)) {
   code = code.replace(prevRe, '');

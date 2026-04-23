@@ -158,6 +158,20 @@ test('set: persists value to disk', () => {
   } finally { cleanup(tmp); }
 });
 
+test('set: atomic write leaves no leftover .tmp file', () => {
+  const tmp = mkTmp();
+  try {
+    const p = path.join(tmp, 'atomic.json');
+    const s = new TrayIconSettings({ path: p });
+    s.set('black');
+    s.set('white');
+    s.set('auto');
+    const entries = fs.readdirSync(tmp);
+    // Only the final file should exist, never a trailing .tmp
+    assert.deepEqual(entries, ['atomic.json']);
+  } finally { cleanup(tmp); }
+});
+
 test('set: creates parent directory if missing', () => {
   const tmp = mkTmp();
   try {
