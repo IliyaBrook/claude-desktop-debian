@@ -80,16 +80,10 @@ patch_tray_inplace_update() {
 	echo 'Patching tray rebuild to update in-place on theme change...'
 	local index_js='app.asar.contents/.vite/build/index.js'
 
-	# Detect prior application of this patch.
-	if grep -qF ".nativeImage.createFromPath(t));process.platform!==" "$index_js"; then
-		echo '  In-place fast-path already present (idempotent)'
-		echo '##############################################################'
-		return
-	fi
-
 	# Re-extract the tray variable name — `patch_tray_menu_handler`
 	# declares it `local` so it's not visible here. Same grep pattern.
-	local tray_func local_tray_var tray_var_re menu_func
+	local tray_func local_tray_var tray_var_re electron_var_re_local
+	local menu_func path_var enabled_var
 	tray_func=$(grep -oP \
 		'on\("menuBarEnabled",\(\)=>\{\K\w+(?=\(\)\})' "$index_js")
 	if [[ -z $tray_func ]]; then
@@ -108,6 +102,8 @@ patch_tray_inplace_update() {
 	echo "  Found tray variable: $local_tray_var"
 
 	tray_var_re="${local_tray_var//\$/\\$}"
+	electron_var_re_local="${electron_var//\$/\\$}"
+
 	menu_func=$(grep -oP "${tray_var_re}\.setContextMenu\(\K\w+(?=\(\))" \
 		"$index_js" | head -1)
 	if [[ -z $menu_func ]]; then
@@ -117,22 +113,68 @@ patch_tray_inplace_update() {
 	fi
 	echo "  Found menu function: $menu_func"
 
+	# Extract the icon-path local used in the original
+	#   Nh = new pA.Tray(pA.nativeImage.createFromPath(X))
+	# call. That `X` is the `const` assigned `path.join(resourcesDir(),
+	# suffix)` earlier in the function; minifier renames it between
+	# releases, so it needs to be extracted (not hardcoded).
+	path_var=$(grep -oP \
+		"${tray_var_re}=new ${electron_var_re_local}\.Tray\(${electron_var_re_local}\.nativeImage\.createFromPath\(\K\w+(?=\))" \
+		"$index_js" | head -1)
+	if [[ -z $path_var ]]; then
+		echo '  Could not extract icon-path var — skipping'
+		echo '##############################################################'
+		return
+	fi
+	echo "  Found icon-path var: $path_var"
+
+	# Extract the menuBarEnabled local — identical pattern to
+	# patch_menu_bar_default, but here we want the local inside the
+	# tray function body (the first `const X = fn("menuBarEnabled")`).
+	enabled_var=$(grep -oP \
+		'const \K\w+(?=\s*=\s*\w+\("menuBarEnabled"\))' "$index_js" \
+		| head -1)
+	if [[ -z $enabled_var ]]; then
+		echo '  Could not extract menuBarEnabled var — skipping'
+		echo '##############################################################'
+		return
+	fi
+	echo "  Found menuBarEnabled var: $enabled_var"
+
+	# Idempotency guard: re-running the patch is a no-op once our
+	# fast-path is in place. Key on the distinctive
+	# "setImage(EL.nativeImage.createFromPath(PATH_VAR))" sequence
+	# using the (post-rename) extracted names — the destroy+recreate
+	# slow-path still exists below, so we can't just count occurrences
+	# of setImage.
+	local fast_path_marker
+	fast_path_marker="${local_tray_var}.setImage(${electron_var}.nativeImage.createFromPath(${path_var}))"
+	if grep -qF "$fast_path_marker" "$index_js"; then
+		echo '  In-place fast-path already present (idempotent)'
+		echo '##############################################################'
+		return
+	fi
+
 	# Inject a fast-path before the existing destroy+recreate block:
 	# when the tray already exists and isn't being disabled, update it
 	# in place with setImage + setContextMenu. Skips the DBus race
 	# where Plasma briefly shows both the old (not yet unregistered)
 	# and the new StatusNotifierItem. Slow path is kept for initial
 	# creation and tray-disable.
-	if ! TRAY_VAR="$local_tray_var" EL_VAR="$electron_var" MENU_FUNC="$menu_func" \
+	if ! TRAY_VAR="$local_tray_var" EL_VAR="$electron_var" \
+		MENU_FUNC="$menu_func" PATH_VAR="$path_var" \
+		ENABLED_VAR="$enabled_var" \
 		node -e "
 const fs = require('fs');
 const p = 'app.asar.contents/.vite/build/index.js';
 const T = process.env.TRAY_VAR;
 const E = process.env.EL_VAR;
 const M = process.env.MENU_FUNC;
+const P = process.env.PATH_VAR;
+const V = process.env.ENABLED_VAR;
 let code = fs.readFileSync(p, 'utf8');
 
-// Build regex that matches the start of the destroy+recreate block,
+// Anchor at the start of the existing destroy+recreate block,
 // tolerating optional inner whitespace.
 const reEsc = (s) => s.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\\$&');
 const anchor = new RegExp(
@@ -144,8 +186,8 @@ if (!anchor.test(code)) {
 }
 
 const fastPath =
-  'if(' + T + '&&e!==false){' +
-    T + '.setImage(' + E + '.nativeImage.createFromPath(t));' +
+  'if(' + T + '&&' + V + '!==false){' +
+    T + '.setImage(' + E + '.nativeImage.createFromPath(' + P + '));' +
     'process.platform!==\"darwin\"&&' + T + '.setContextMenu(' + M + '());' +
     'return' +
   '}';
