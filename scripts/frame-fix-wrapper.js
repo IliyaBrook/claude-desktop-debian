@@ -74,10 +74,30 @@ const LINUX_CSS = `
   }
 `;
 
+// Linux tray-icon user choice. The tray context menu patch (in
+// scripts/patches/tray.sh) reads/writes this via globalThis.__claudeTrayIcon.
+let trayIconSettings = null;
+if (process.platform === 'linux') {
+  try {
+    const TrayIconSettings = require('./tray-icon-settings.js');
+    trayIconSettings = new TrayIconSettings();
+    globalThis.__claudeTrayIcon = {
+      get: () => trayIconSettings.get(),
+      set: (m) => trayIconSettings.set(m),
+    };
+    console.log('[Frame Fix] Tray icon mode =', trayIconSettings.get());
+  } catch (e) {
+    console.warn('[Frame Fix] Tray icon settings failed to load:',
+      e && e.message);
+    trayIconSettings = null;
+  }
+}
+
 // Build the patched BrowserWindow class and Menu interceptor once,
 // on first require('electron'), then reuse via Proxy on every access.
 let PatchedBrowserWindow = null;
 let patchedSetApplicationMenu = null;
+let patchedNativeTheme = null;
 let electronModule = null;
 
 Module.prototype.require = function(id) {
@@ -89,6 +109,52 @@ Module.prototype.require = function(id) {
       electronModule = result;
       const OriginalBrowserWindow = result.BrowserWindow;
       const OriginalMenu = result.Menu;
+      const OriginalNativeTheme = result.nativeTheme;
+
+      // Wrap nativeTheme so shouldUseDarkColors reflects the user's
+      // "Icon color" choice. `target[prop]` (not Reflect.get) and
+      // .bind(target) are needed because nativeTheme is C++-backed —
+      // native getters/methods reject the Proxy as `this`.
+      if (process.platform === 'linux' && trayIconSettings
+          && OriginalNativeTheme) {
+        const { modeToDark } = require('./tray-icon-settings.js');
+        patchedNativeTheme = new Proxy(OriginalNativeTheme, {
+          get(target, prop) {
+            if (prop === 'shouldUseDarkColors') {
+              const v = modeToDark(trayIconSettings.get());
+              if (v !== null) return v;
+            }
+            const value = target[prop];
+            if (typeof value === 'function') return value.bind(target);
+            return value;
+          },
+          set(target, prop, value) {
+            target[prop] = value;
+            return true;
+          },
+        });
+
+        // Relaunch on mode change. AppImage: process.execPath points
+        // inside /tmp/.mount_claudeXXX which is unmounted on exit, so
+        // app.relaunch() → SIGTRAP. Re-exec $APPIMAGE instead; other
+        // packaging formats use Electron's built-in relaunch.
+        trayIconSettings.on('change', (next) => {
+          console.log('[Frame Fix] Tray icon mode =', next, '— relaunching');
+          try {
+            const appimage = process.env.APPIMAGE;
+            if (appimage) {
+              const { spawn } = require('child_process');
+              spawn(appimage, [], { detached: true, stdio: 'ignore' })
+                .unref();
+            } else {
+              result.app.relaunch();
+            }
+            result.app.exit(0);
+          } catch (e) {
+            console.warn('[Frame Fix] Relaunch failed:', e && e.message);
+          }
+        });
+      }
 
       PatchedBrowserWindow = class BrowserWindowWithFrame extends OriginalBrowserWindow {
         constructor(options) {
@@ -343,6 +409,7 @@ Module.prototype.require = function(id) {
     return new Proxy(result, {
       get(target, prop, receiver) {
         if (prop === 'BrowserWindow') return PatchedBrowserWindow;
+        if (prop === 'nativeTheme' && patchedNativeTheme) return patchedNativeTheme;
         if (prop === 'Menu') {
           // Return a proxy for Menu that intercepts setApplicationMenu
           const originalMenu = target.Menu;

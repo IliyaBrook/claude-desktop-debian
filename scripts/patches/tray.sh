@@ -76,6 +76,94 @@ patch_tray_menu_handler() {
 	echo '##############################################################'
 }
 
+patch_tray_inplace_update() {
+	echo 'Patching tray rebuild to update in-place on theme change...'
+	local index_js='app.asar.contents/.vite/build/index.js'
+
+	# Detect prior application of this patch.
+	if grep -qF ".nativeImage.createFromPath(t));process.platform!==" "$index_js"; then
+		echo '  In-place fast-path already present (idempotent)'
+		echo '##############################################################'
+		return
+	fi
+
+	# Re-extract the tray variable name — `patch_tray_menu_handler`
+	# declares it `local` so it's not visible here. Same grep pattern.
+	local tray_func local_tray_var tray_var_re menu_func
+	tray_func=$(grep -oP \
+		'on\("menuBarEnabled",\(\)=>\{\K\w+(?=\(\)\})' "$index_js")
+	if [[ -z $tray_func ]]; then
+		echo '  Could not find tray function — skipping'
+		echo '##############################################################'
+		return
+	fi
+	local_tray_var=$(grep -oP \
+		"\}\);let \K\w+(?==null;(?:async )?function ${tray_func})" \
+		"$index_js")
+	if [[ -z $local_tray_var ]]; then
+		echo '  Could not extract tray variable name — skipping'
+		echo '##############################################################'
+		return
+	fi
+	echo "  Found tray variable: $local_tray_var"
+
+	tray_var_re="${local_tray_var//\$/\\$}"
+	menu_func=$(grep -oP "${tray_var_re}\.setContextMenu\(\K\w+(?=\(\))" \
+		"$index_js" | head -1)
+	if [[ -z $menu_func ]]; then
+		echo '  Could not extract menu function name — skipping'
+		echo '##############################################################'
+		return
+	fi
+	echo "  Found menu function: $menu_func"
+
+	# Inject a fast-path before the existing destroy+recreate block:
+	# when the tray already exists and isn't being disabled, update it
+	# in place with setImage + setContextMenu. Skips the DBus race
+	# where Plasma briefly shows both the old (not yet unregistered)
+	# and the new StatusNotifierItem. Slow path is kept for initial
+	# creation and tray-disable.
+	if ! TRAY_VAR="$local_tray_var" EL_VAR="$electron_var" MENU_FUNC="$menu_func" \
+		node -e "
+const fs = require('fs');
+const p = 'app.asar.contents/.vite/build/index.js';
+const T = process.env.TRAY_VAR;
+const E = process.env.EL_VAR;
+const M = process.env.MENU_FUNC;
+let code = fs.readFileSync(p, 'utf8');
+
+// Build regex that matches the start of the destroy+recreate block,
+// tolerating optional inner whitespace.
+const reEsc = (s) => s.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\\$&');
+const anchor = new RegExp(
+  ';if\\\\(' + reEsc(T) + '&&\\\\(' + reEsc(T) + '\\\\.destroy\\\\(\\\\)'
+);
+if (!anchor.test(code)) {
+  console.error('  [FAIL] destroy-recreate anchor not found');
+  process.exit(1);
+}
+
+const fastPath =
+  'if(' + T + '&&e!==false){' +
+    T + '.setImage(' + E + '.nativeImage.createFromPath(t));' +
+    'process.platform!==\"darwin\"&&' + T + '.setContextMenu(' + M + '());' +
+    'return' +
+  '}';
+
+// Prefix the destroy block with the fast-path, keeping the matched
+// portion ';if(TRAY&&(TRAY.destroy()' intact.
+code = code.replace(anchor, (m) => ';' + fastPath + m.slice(1));
+fs.writeFileSync(p, code);
+console.log('  [OK] Fast-path injected before destroy-recreate');
+"; then
+		echo 'Failed to inject tray in-place fast-path' >&2
+		cd "$project_root" || exit 1
+		exit 1
+	fi
+
+	echo '##############################################################'
+}
+
 patch_tray_icon_selection() {
 	echo 'Patching tray icon selection for Linux visibility...'
 	local index_js='app.asar.contents/.vite/build/index.js'
@@ -89,6 +177,71 @@ patch_tray_icon_selection() {
 	else
 		echo 'Tray icon selection pattern not found or already patched'
 	fi
+	echo '##############################################################'
+}
+
+patch_tray_icon_submenu() {
+	echo 'Patching tray context menu with Icon color submenu...'
+	local index_js='app.asar.contents/.vite/build/index.js'
+
+	# Strip any previously-injected submenu so re-runs rebuild fresh,
+	# regardless of old label spacing (Dark/Light legacy or Black/White).
+	if grep -q 'Icon color' "$index_js" 2>/dev/null; then
+		echo '  Stripping previous Icon color submenu for clean re-inject...'
+		if ! node -e "
+const fs = require('fs');
+const p = 'app.asar.contents/.vite/build/index.js';
+let code = fs.readFileSync(p, 'utf8');
+const prevRe = /\\{label:\"Icon color[^\"]*\",submenu:\\[[^\\]]*?\\]\\},/;
+if (prevRe.test(code)) {
+  code = code.replace(prevRe, '');
+  fs.writeFileSync(p, code);
+  console.log('  [OK] Previous submenu removed');
+} else {
+  console.error('  [WARN] \\'Icon color\\' found but regex did not match');
+}
+"; then
+			echo 'Failed to strip previous submenu' >&2
+			cd "$project_root" || exit 1
+			exit 1
+		fi
+	fi
+
+	# Anchor on the Quit i18n ID — stable across minifier churn.
+	# Radio labels describe the icon's colour: Black/White/Auto.
+	# Label ends with ASCII space + U+2003 EM SPACE so Plasma's
+	# submenu-arrow glyph doesn't render glued to the letter 'r'
+	# (single U+00A0 rendered as zero-width on Plasma 6).
+	if ! node -e "
+const fs = require('fs');
+const p = 'app.asar.contents/.vite/build/index.js';
+let code = fs.readFileSync(p, 'utf8');
+
+// Quit menu item anchor: {label:X.formatMessage({...id:\"dKX0bpR+a2\"...}),click:FN}
+const quitRe = /\\{label:\\w+\\.formatMessage\\(\\{[^{}]*?id:\"dKX0bpR\\+a2\"[^{}]*?\\}\\),click:\\w+\\}/;
+if (!quitRe.test(code)) {
+  console.error('  [FAIL] Quit anchor not found in index.js');
+  process.exit(1);
+}
+
+const rkey = 'globalThis.__claudeTrayIcon';
+const GAP = ' \u2003';  // ASCII space + U+2003 EM SPACE
+const submenu =
+  '{label:\"Icon color' + GAP + '\",submenu:[' +
+    '{label:\"Auto\",type:\"radio\",checked:(' + rkey + '?.get()||\"auto\")===\"auto\",click(){' + rkey + '?.set(\"auto\")}},' +
+    '{label:\"Black\",type:\"radio\",checked:' + rkey + '?.get()===\"black\",click(){' + rkey + '?.set(\"black\")}},' +
+    '{label:\"White\",type:\"radio\",checked:' + rkey + '?.get()===\"white\",click(){' + rkey + '?.set(\"white\")}}' +
+  ']},';
+
+code = code.replace(quitRe, submenu + '\$&');
+fs.writeFileSync(p, code);
+console.log('  [OK] Icon color submenu inserted before Quit');
+"; then
+		echo 'Failed to inject tray Icon color submenu' >&2
+		cd "$project_root" || exit 1
+		exit 1
+	fi
+
 	echo '##############################################################'
 }
 

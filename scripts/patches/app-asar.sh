@@ -22,6 +22,7 @@ patch_app_asar() {
 	echo "Original main entry: $original_main"
 
 	cp "$source_dir/scripts/frame-fix-wrapper.js" app.asar.contents/frame-fix-wrapper.js || exit 1
+	cp "$source_dir/scripts/tray-icon-settings.js" app.asar.contents/tray-icon-settings.js || exit 1
 
 	cat > app.asar.contents/frame-fix-entry.js << EOFENTRY
 // Load frame fix first
@@ -74,8 +75,15 @@ console.log('Updated package.json: main entry and node-pty dependency');
 	# Patch tray menu handler
 	patch_tray_menu_handler
 
+	# In-place tray update on OS theme change (pre-existing KDE
+	# duplicate-icon bug — see docs/learnings/tray-icon-theme.md)
+	patch_tray_inplace_update
+
 	# Patch tray icon selection
 	patch_tray_icon_selection
+
+	# Inject "Icon color" submenu into tray context menu
+	patch_tray_icon_submenu
 
 	# Patch menuBarEnabled to default to true when unset
 	patch_menu_bar_default
