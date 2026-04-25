@@ -24,15 +24,15 @@ detect_architecture() {
 
 	case "$raw_arch" in
 		x86_64)
-			claude_download_url='https://downloads.claude.ai/releases/win32/x64/1.3883.0/Claude-93ff6cb984386882b4bd9b6bca80d4cf5af8e13b.exe'
-			claude_exe_sha256='13fa53ddea0a362e4b91d289c7e9f1186039b79963b5a8e31409e31cac1bb591'
+			claude_download_url='https://downloads.claude.ai/releases/win32/x64/1.4758.0/Claude-fb266c24b61d94290860a3945b138d6d249425f6.exe'
+			claude_exe_sha256='6dc40bb2801e3ae970d7f1d6aa79b90dabb1d9ae9184a1d274b19950dff63215'
 			architecture='amd64'
 			claude_exe_filename='Claude-Setup-x64.exe'
 			echo 'Configured for amd64 (x86_64) build.'
 			;;
 		aarch64)
-			claude_download_url='https://downloads.claude.ai/releases/win32/arm64/1.3883.0/Claude-93ff6cb984386882b4bd9b6bca80d4cf5af8e13b.exe'
-			claude_exe_sha256='4862b7684d1c14207922c48864f644d3766026012265f5bc62111ff48caec982'
+			claude_download_url='https://downloads.claude.ai/releases/win32/arm64/1.4758.0/Claude-fb266c24b61d94290860a3945b138d6d249425f6.exe'
+			claude_exe_sha256='fcdaf9070c07eb85dac80fae9fc5f879c96fcd78312a28a41d7b1bd54f3ef81d'
 			architecture='arm64'
 			claude_exe_filename='Claude-Setup-arm64.exe'
 			echo 'Configured for arm64 (aarch64) build.'
