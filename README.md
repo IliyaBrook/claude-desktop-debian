@@ -207,7 +207,9 @@ Special thanks to:
   - Diagnosing the session-start hook sudo blocking issue with three solution approaches
 - **[chukfinley](https://github.com/chukfinley)** for experimental Cowork mode support on Linux
 - **[CyPack](https://github.com/CyPack)** for orphaned cowork daemon cleanup on startup
-- **[IliyaBrook](https://github.com/IliyaBrook)** for fixing the platform patch for Claude Desktop >= 1.1.3541 arm64 refactor
+- **[IliyaBrook](https://github.com/IliyaBrook)**
+  - Fixing the platform patch for Claude Desktop >= 1.1.3541 arm64 refactor
+  - Fixing the duplicate tray icon on OS theme change with an in-place `setImage`/`setContextMenu` fast-path that avoids the KDE Plasma SNI re-registration race
 - **[MichaelMKenny](https://github.com/MichaelMKenny)**
   - Diagnosing the `$`-prefixed electron variable bug
   - Root cause analysis and workaround
