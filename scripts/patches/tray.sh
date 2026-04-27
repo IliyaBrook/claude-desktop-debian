@@ -98,8 +98,8 @@ patch_tray_inplace_update() {
 
 	# Re-extract the tray variable name — `patch_tray_menu_handler`
 	# declares it `local` so it's not visible here. Same grep pattern.
-	local tray_func local_tray_var tray_var_re electron_var_re_local
-	local menu_func path_var enabled_var
+	local tray_func local_tray_var tray_var_re
+	local menu_func path_var enabled_var enabled_count
 	tray_func=$(grep -oP \
 		'on\("menuBarEnabled",\(\)=>\{\K\w+(?=\(\)\})' "$index_js")
 	if [[ -z $tray_func ]]; then
@@ -118,7 +118,6 @@ patch_tray_inplace_update() {
 	echo "  Found tray variable: $local_tray_var"
 
 	tray_var_re="${local_tray_var//\$/\\$}"
-	electron_var_re_local="${electron_var//\$/\\$}"
 
 	menu_func=$(grep -oP "${tray_var_re}\.setContextMenu\(\K\w+(?=\(\))" \
 		"$index_js" | head -1)
@@ -135,7 +134,7 @@ patch_tray_inplace_update() {
 	# suffix)` earlier in the function; minifier renames it between
 	# releases, so it needs to be extracted (not hardcoded).
 	path_var=$(grep -oP \
-		"${tray_var_re}=new ${electron_var_re_local}\.Tray\(${electron_var_re_local}\.nativeImage\.createFromPath\(\K\w+(?=\))" \
+		"${tray_var_re}=new ${electron_var_re}\.Tray\(${electron_var_re}\.nativeImage\.createFromPath\(\K\w+(?=\))" \
 		"$index_js" | head -1)
 	if [[ -z $path_var ]]; then
 		echo '  Could not extract icon-path var — skipping'
@@ -144,12 +143,21 @@ patch_tray_inplace_update() {
 	fi
 	echo "  Found icon-path var: $path_var"
 
-	# Extract the menuBarEnabled local — identical pattern to
-	# patch_menu_bar_default, but here we want the local inside the
-	# tray function body (the first `const X = fn("menuBarEnabled")`).
+	# Extract the menuBarEnabled local. The injected fast-path needs to
+	# read the same local that the slow-path destroy/recreate block
+	# tests, so binding to the wrong site is silently broken. Bail if
+	# upstream ever ships >1 declaration site instead of taking the
+	# first one.
+	enabled_count=$(grep -cE \
+		'const \w+\s*=\s*\w+\("menuBarEnabled"\)' "$index_js")
+	if [[ $enabled_count -ne 1 ]]; then
+		echo "  Expected 1 menuBarEnabled declaration, found" \
+			"${enabled_count} — skipping"
+		echo '##############################################################'
+		return
+	fi
 	enabled_var=$(grep -oP \
-		'const \K\w+(?=\s*=\s*\w+\("menuBarEnabled"\))' "$index_js" \
-		| head -1)
+		'const \K\w+(?=\s*=\s*\w+\("menuBarEnabled"\))' "$index_js")
 	if [[ -z $enabled_var ]]; then
 		echo '  Could not extract menuBarEnabled var — skipping'
 		echo '##############################################################'
@@ -221,7 +229,6 @@ console.log('  [OK] Fast-path injected before destroy-recreate');
 
 	echo '##############################################################'
 }
-
 
 patch_menu_bar_default() {
 	echo 'Patching menuBarEnabled to default to true when unset...'
